@@ -1,8 +1,7 @@
 """
 Расчётное ядро: ГОСТ Р 58669-2019.
 
-Реализованы четыре метода определения времени до насыщения:
-
+Методы определения времени до насыщения:
 1) АНАЛИТИЧЕСКИЙ (раздел 5.1)
 2) ГРАФИЧЕСКИЙ ПО ПАСПОРТНЫМ ДАННЫМ (раздел 5.2, приложение Б)
 3) ГРАФИЧЕСКИЙ С ИСПОЛЬЗОВАНИЕМ ВАХ (раздел 5.3)
@@ -224,18 +223,18 @@ def _graphic(ct, kz, k_r, a, theta_override=None) -> SaturationResult:
 # ---------------------------------------------------------------------------
 
 def build_vah_default(u_star, i0_star, r2, n_points=100):
-    """Построение типовой ВАХ ТТ."""
+    """Построение типовой ВАХ ТТ. Возвращает dict с массивами i0, u, psi."""
     i0_max = i0_star * 3.0
     i0_arr = np.linspace(0.001, i0_max, n_points)
-    
+
     x = i0_arr / i0_star
     y_norm = u_star / i0_star
-    
-    u_arr = y_norm * i0_star * (1 - np.exp(-x)) / (1 + 0.1 * x**2)
+
+    u_arr = y_norm * i0_star * (1 - np.exp(-x)) / (1 + 0.1 * x ** 2)
     u_arr = np.clip(u_arr, 0, u_star * 1.2)
-    
+
     psi_arr = u_arr / OMEGA
-    
+
     return {
         'i0': i0_arr.tolist(),
         'u': u_arr.tolist(),
@@ -246,14 +245,14 @@ def build_vah_default(u_star, i0_star, r2, n_points=100):
 
 
 def calc_a_from_vah(u_star, u2sin):
-    """Параметр режима A по формуле (19) ГОСТ Р 58669-2019."""
+    """Параметр режима A по формуле (19) ГОСТ Р 58669-2019: A = U* / U2sin."""
     if u2sin <= 0:
         raise ValueError("U2sin должен быть больше нуля.")
     return u_star / u2sin
 
 
 def calc_u2sin(ct, kz):
-    """Напряжение на вторичной обмотке при фактическом токе КЗ."""
+    """Напряжение на вторичной обмотке при фактическом токе КЗ: U2sin = I2ном·Kфакт·z2Σ."""
     k_fact = kz.i_kz / ct.i1_nom
     return ct.i2_nom * k_fact * ct.z2_sigma
 
@@ -262,129 +261,12 @@ def validate_vah_usage(u_star, i0_star, ct, kz):
     """Проверка условия (16) ГОСТ Р 58669-2019."""
     k_fact = kz.i_kz / ct.i1_nom
     i0_eps = 0.1 * ct.i2_nom * k_fact
-    
+
     i_lin = i0_star * 0.1
     u_lin = u_star * 0.1
     u_eps = u_star * (i0_eps / i0_star) if i0_eps <= i0_star else u_star
-    
-    if i_lin == 0 or u_lin == 0:
+
+    if i_lin == 0 or u_lin == 0 or u_eps == 0:
         return False, "Невозможно определить параметры линейного участка ВАХ."
-    
-    ratio = (i0_eps / u_eps) / (i_lin / u_lin)
-    if ratio > 3:
-        return True, f"Условие (16) выполняется: отношение = {ratio:.2f} > 3."
-    else:
-        return False, f"Условие (16) не выполняется: отношение = {ratio:.2f} ≤ 3."
 
-
-# ---------------------------------------------------------------------------
-# МЕТОД ПО ХАРАКТЕРИСТИКЕ НАМАГНИЧИВАНИЯ (п. 5.4 ГОСТ Р 58669-2019)
-# ---------------------------------------------------------------------------
-
-def build_bn_default(b_sat=1.8, h_knee=100, n_points=100):
-    """Построение типовой характеристики намагничивания B(H) для электротехнической стали.
-    
-    Типовая характеристика: линейный участок до H_knee, затем насыщение при B_sat.
-    """
-    h_arr = np.linspace(0, h_knee * 5, n_points)
-    
-    # Линейный участок + плавное насыщение
-    mu_initial = b_sat / h_knee  # начальная магнитная проницаемость
-    b_arr = np.where(h_arr <= h_knee,
-                     mu_initial * h_arr,
-                     b_sat * (1 - np.exp(-(h_arr - h_knee) / (h_knee * 0.5))))
-    
-    return {
-        'h': h_arr.tolist(),
-        'b': b_arr.tolist(),
-        'b_sat': b_sat,
-        'h_knee': h_knee,
-    }
-
-
-def calc_b_from_bn(h_value, bn_data):
-    """Интерполяция B по H из характеристики намагничивания."""
-    h_arr = np.array(bn_data['h'])
-    b_arr = np.array(bn_data['b'])
-    
-    if h_value <= h_arr[0]:
-        return b_arr[0]
-    if h_value >= h_arr[-1]:
-        return b_arr[-1]
-    
-    # Линейная интерполяция
-    idx = np.searchsorted(h_arr, h_value)
-    h0, h1 = h_arr[idx-1], h_arr[idx]
-    b0, b1 = b_arr[idx-1], b_arr[idx]
-    
-    return b0 + (b1 - b0) * (h_value - h0) / (h1 - h0)
-
-
-def calc_a_from_bn(ct, kz, bn_data, w2, s):
-    """Параметр режима A по формуле (23) ГОСТ Р 58669-2019.
-    
-    A = Bт / Bт(Hг)
-    
-    Где:
-    - Bт = U2sin / (222 · w2 · s) — амплитуда магнитной индукции (формула 24)
-    - Hг = I0ε · w2 / l — действующее значение напряженности магнитного поля
-    - Bт(Hг) — значение B при H = Hг из характеристики намагничивания
-    """
-    # U2sin
-    k_fact = kz.i_kz / ct.i1_nom
-    u2sin = ct.i2_nom * k_fact * ct.z2_sigma
-    
-    # Bт по формуле (24)
-    b_t = u2sin / (222 * w2 * s)
-    
-    # I0ε по формуле (17)
-    i0_eps = 0.1 * ct.i2_nom * k_fact
-    
-    # Hг (действующее значение)
-    # Примечание: в формуле нужна длина силовой линии l, но она не передана
-    # Для типовой характеристики используем H_knee как опорную точку
-    h_g = i0_eps * w2 / 1.0  # предполагаем l = 1 м по умолчанию
-    
-    # Bт(Hг) из характеристики
-    b_t_hg = calc_b_from_bn(h_g, bn_data)
-    
-    if b_t_hg <= 0:
-        return 1.0  # защита от деления на ноль
-    
-    return b_t / b_t_hg
-
-
-def validate_bn_usage(ct, kz, bn_data, w2, s):
-    """Проверка условия (21) ГОСТ Р 58669-2019: Bт > 1.8 Тл."""
-    k_fact = kz.i_kz / ct.i1_nom
-    u2sin = ct.i2_nom * k_fact * ct.z2_sigma
-    b_t = u2sin / (222 * w2 * s)
-    
-    if b_t > 1.8:
-        return True, f"Условие (21) выполняется: Bт = {b_t:.3f} Тл > 1.8 Тл."
-    else:
-        return False, f"Условие (21) не выполняется: Bт = {b_t:.3f} Тл ≤ 1.8 Тл."
-
-
-ANALYTIC_KEYS = ("without_residual", "with_residual")
-GRAPHIC_KEYS = ("graphic_without_residual", "graphic_with_residual")
-VAH_KEYS = ("vah_without_residual", "vah_with_residual")
-BN_KEYS = ("bn_without_residual", "bn_with_residual")
-ALL_KEYS = ANALYTIC_KEYS + GRAPHIC_KEYS + VAH_KEYS + BN_KEYS
-
-
-def calculate(ct: CTParams, kz: KZParams, method: str = "analytic",
-              theta_override: Optional[float] = None) -> dict:
-    """Расчёт для обоих вариантов остаточной намагниченности."""
-    a = calc_a_param(ct, kz)
-    out = {
-        "without_residual": _analytic(ct, kz, 0.0, a),
-        "with_residual": _analytic(ct, kz, K_R_PRED, a),
-    }
-    if method in ("graphic", "both"):
-        out["graphic_without_residual"] = _graphic(ct, kz, 0.0, a, theta_override)
-        out["graphic_with_residual"] = _graphic(ct, kz, K_R_PRED, a, theta_override)
-    return out
-
-
-# === КОНЕЦ ФАЙЛА methods/gost_58669.py ===
+    ratio = (i0_eps / u_eps) / (i_lin
