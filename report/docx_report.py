@@ -1,16 +1,30 @@
-"""Генерация отчёта в формате Word (.docx)."""
+"""Генерация отчёта в формате Word (.docx), включая графики K_п.р(t)."""
 from __future__ import annotations
 
 import io
 import math
+import os
+import tempfile
 from datetime import datetime
 
 from docx import Document
+from docx.shared import Inches
 
 from methods.gost_58669 import (
     ANALYTIC_KEYS, GRAPHIC_KEYS, K_R_PRED, ST_GRAPHIC_REQUIRED, ST_NO_SAT, ST_OK,
-    ST_STEADY,
+    ST_STEADY, build_kpr_curve,
 )
+
+# matplotlib: неинтерактивный бэкенд и шрифт с поддержкой кириллицы.
+# Если пакет отсутствует — отчёт собирается без графиков.
+try:
+    os.environ.setdefault("MPLCONFIGDIR", tempfile.mkdtemp(prefix="mpl_"))
+    import matplotlib
+    matplotlib.use("Agg")
+    matplotlib.rcParams["font.family"] = "DejaVu Sans"
+    _HAS_MPL = True
+except Exception:
+    _HAS_MPL = False
 
 METHOD_TITLES = {
     "analytic": "аналитический метод (раздел 5.1)",
@@ -58,6 +72,50 @@ def _keys_for(method: str):
     if method == "both":
         return ANALYTIC_KEYS + GRAPHIC_KEYS
     return ANALYTIC_KEYS
+
+
+def _make_chart_png(kz, ct, gres, eff) -> io.BytesIO:
+    """Рендер графика K_п.р(t) в PNG для вставки в Word."""
+    if not _HAS_MPL:
+        raise RuntimeError("matplotlib не установлен")
+    import matplotlib.pyplot as plt
+
+    if gres.status == ST_OK and gres.t_nas is not None:
+        t_nas_ms = gres.t_nas * 1000.0
+        t_end = min(max(t_nas_ms * 1.45, 20.0), 400.0)
+    else:
+        t_nas_ms = None
+        t_end = min(max(kz.t_p * 3000.0, 40.0), 400.0)
+
+    theta = gres.theta_star if gres.theta_star is not None else 0.0
+    t_ms, k_star = build_kpr_curve(kz.t_p, ct.alpha, theta, t_end)
+    _, k_zero = build_kpr_curve(kz.t_p, ct.alpha, 0.0, t_end)
+
+    lbl_star = (f"θ = {math.degrees(theta):.1f}° (задано вручную)" if gres.theta_manual
+                else "θ = θ* (расчётный минимум, п. Г.3.7)")
+
+    fig, ax = plt.subplots(figsize=(8.0, 4.0))
+    ax.plot(t_ms, k_star, color="#d62728", linewidth=2.0, label=lbl_star)
+    ax.plot(t_ms, k_zero, color="#1f77b4", linewidth=1.3, label="θ = 0°")
+    ax.axhline(eff, color="#2ca02c", linestyle="--", linewidth=1.5,
+               label=f"Уровень A·(1−K_r) = {eff:.3f}")
+    if t_nas_ms is not None:
+        ax.axvline(t_nas_ms, color="#2ca02c", linestyle=":", linewidth=1.0)
+        ax.plot([t_nas_ms], [eff], "o", color="#2ca02c", markersize=9,
+                label=f"t_нас = {t_nas_ms:.2f} мс")
+    ax.set_xlabel("Время t, мс")
+    ax.set_ylabel("Коэффициент переходного режима K_п.р(t)")
+    ax.set_title(f"{kz.label} · T_p = {kz.t_p * 1000:.0f} мс · cos α = {ct.cos_alpha:.3f}",
+                 fontsize=10)
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8, loc="best")
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
 
 
 def build_report(ct, results, verdict_lines, verdict, t_req_ms, method="analytic") -> bytes:
@@ -123,7 +181,8 @@ def build_report(ct, results, verdict_lines, verdict, t_req_ms, method="analytic
             m_name = "графический" if key in GRAPHIC_KEYS else "аналитический"
             extra = ""
             if key in GRAPHIC_KEYS and r.status == ST_OK and r.theta_star is not None:
-                extra = f", θ* = {math.degrees(r.theta_star):.1f}°"
+                tag = "вручную" if r.theta_manual else "θ*"
+                extra = f", {tag} = {math.degrees(r.theta_star):.1f}°"
             rows.append((f"{m_name} — {SCENARIO_TITLES[key]}", f"{r.a:.4f}",
                          f"{fmt_t(r)}{extra}"))
         _add_table(doc, ["Метод и сценарий", "Параметр A", "Время до насыщения"], rows)
@@ -137,6 +196,22 @@ def build_report(ct, results, verdict_lines, verdict, t_req_ms, method="analytic
                 if note not in seen:
                     seen.add(note)
                     doc.add_paragraph(note, style="List Bullet")
+
+        # Графики K_п.р(t) для графического метода
+        if method in ("graphic", "both"):
+            for key in GRAPHIC_KEYS:
+                r = res.get(key)
+                if r is None or r.status != ST_OK or r.t_nas is None:
+                    continue
+                eff = r.a * (1.0 - r.k_r)
+                cap = doc.add_paragraph()
+                cap.add_run(f"График K_п.р(t) — {SCENARIO_TITLES[key]}:").bold = True
+                try:
+                    png = _make_chart_png(kz, ct, r, eff)
+                    doc.add_picture(png, width=Inches(6.0))
+                except Exception as exc:
+                    doc.add_paragraph(f"(График не построен: {type(exc).__name__}. "
+                                      "Установите библиотеку matplotlib для отображения графиков.)")
 
     doc.add_heading("Вывод", level=1)
     label = {"success": "ТТ проходит проверку.",
