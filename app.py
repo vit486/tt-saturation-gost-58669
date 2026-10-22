@@ -396,8 +396,8 @@ with tab_calc:
                       else f"K_r = {K_R_PRED}")
                 cmp_rows.append({
                     "Режим": kz.label, "Сценарий": sc,
-                    "Аналитический": round(ta, 2) if ta else fmt_t(ra),
-                    "Графический": round(tg, 2) if tg else fmt_t(rg),
+                    "Аналитический": f"{ta:.2f} мс" if ta is not None else fmt_t(ra),
+                    "Графический": f"{tg:.2f} мс" if tg is not None else fmt_t(rg),
                     "Отклонение аналитики": dev,
                 })
         st.table(cmp_rows)
