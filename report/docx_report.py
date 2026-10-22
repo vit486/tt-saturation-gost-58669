@@ -11,8 +11,8 @@ from docx import Document
 from docx.shared import Inches
 
 from methods.gost_58669 import (
-    ANALYTIC_KEYS, GRAPHIC_KEYS, K_R_PRED, ST_GRAPHIC_REQUIRED, ST_NO_SAT, ST_OK,
-    ST_STEADY, build_kpr_curve,
+    ANALYTIC_KEYS, GRAPHIC_KEYS, VAH_KEYS, BN_KEYS, K_R_PRED, ST_GRAPHIC_REQUIRED, ST_NO_SAT, ST_OK,
+    ST_STEADY, build_kpr_curve, build_vah_default, build_bn_default,
 )
 
 # matplotlib: неинтерактивный бэкенд и шрифт с поддержкой кириллицы.
@@ -223,7 +223,52 @@ def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="a
                 except Exception as exc:
                     doc.add_paragraph(f"(График не построен: {type(exc).__name__}. "
                                       "Установите библиотеку matplotlib для отображения графиков.)")
-
+        # График ВАХ для метода по ВАХ
+        if method in ("graphic", "both") and 'vah_without_residual' in res:
+            r_vah = res.get('vah_without_residual')
+            if r_vah and r_vah.status == ST_OK:
+                try:
+                    vah_plot = build_vah_default(100.0, 1.0, ct_m.r2)  # типовые параметры
+                    fig_vah, ax_vah = plt.subplots(figsize=(8.0, 4.0))
+                    ax_vah.plot(vah_plot['i0'], vah_plot['u'], color="#d62728", linewidth=2.0)
+                    ax_vah.set_xlabel("Ток намагничивания I₀, А")
+                    ax_vah.set_ylabel("Напряжение U, В")
+                    ax_vah.set_title("Вольт-амперная характеристика ТТ (типовая)", fontsize=10)
+                    ax_vah.grid(True, alpha=0.3)
+                    fig_vah.tight_layout()
+                    buf_vah = io.BytesIO()
+                    fig_vah.savefig(buf_vah, format="png", dpi=150)
+                    plt.close(fig_vah)
+                    buf_vah.seek(0)
+                    doc.add_paragraph()
+                    doc.add_paragraph("График ВАХ:").bold = True
+                    doc.add_picture(buf_vah, width=Inches(6.0))
+                except Exception:
+                    pass
+        
+        # График B(H) для метода по характеристике намагничивания
+        if method in ("graphic", "both") and 'bn_without_residual' in res:
+            r_bn = res.get('bn_without_residual')
+            if r_bn and r_bn.status == ST_OK:
+                try:
+                    bn_plot = build_bn_default(1.8, 100)  # типовые параметры
+                    fig_bn, ax_bn = plt.subplots(figsize=(8.0, 4.0))
+                    ax_bn.plot(bn_plot['h'], bn_plot['b'], color="#9467bd", linewidth=2.0)
+                    ax_bn.set_xlabel("Напряжённость H, А/м")
+                    ax_bn.set_ylabel("Индукция B, Тл")
+                    ax_bn.set_title("Характеристика намагничивания B(H) (типовая)", fontsize=10)
+                    ax_bn.grid(True, alpha=0.3)
+                    fig_bn.tight_layout()
+                    buf_bn = io.BytesIO()
+                    fig_bn.savefig(buf_bn, format="png", dpi=150)
+                    plt.close(fig_bn)
+                    buf_bn.seek(0)
+                    doc.add_paragraph()
+                    doc.add_paragraph("Характеристика намагничивания B(H):").bold = True
+                    doc.add_picture(buf_bn, width=Inches(6.0))
+                except Exception:
+                    pass
+                    
     doc.add_heading("Вывод", level=1)
     label = {"success": "ТТ проходит проверку.",
              "warning": "ТТ проходит проверку с замечаниями.",
