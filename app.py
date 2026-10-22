@@ -79,6 +79,8 @@ SCENARIO_TITLE = {
     "graphic_with_residual": f"Графический · с остаточной намагниченностью (K_r = {K_R_PRED})",
     "vah_without_residual": "По ВАХ · без остаточной намагниченности (K_r = 0)",
     "vah_with_residual": f"По ВАХ · с остаточной намагниченностью (K_r = {K_R_PRED})",
+    "bn_without_residual": "По B(H) · без остаточной намагниченности (K_r = 0)",
+    "bn_with_residual": f"По B(H) · с остаточной намагниченностью (K_r = {K_R_PRED})",
 }
 LBL_STAR_AUTO = "θ = θ* — расчётный минимум (п. Г.3.7)"
 LBL_ZERO = "θ = 0° — максимум апериодической составляющей"
@@ -86,7 +88,8 @@ LBL_ZERO = "θ = 0° — максимум апериодической сост�
 # Коэффициенты расчётной длины кабеля: (трёхфазное КЗ, однофазное КЗ)
 SCHEME_FACTORS = {
     "Полная звезда (3 ТТ)": (1.0, 2.0),
-    "Неполная звезда (2 ТТ)": (math.sqrt(3.0), 2.0),
+    "Неполная звезда (2 ТТ)": (math.sqrt(3.0), math.sqrt(3.0)),  # исправлено
+    "Треугольник": (3.0, 3.0),  # добавлено
     "Один ТТ (токовые цепи в 2 проводах)": (2.0, 2.0),
 }
 # Удельное сопротивление жил при 20 °С (п. 4.2.1 ГОСТ 58669), Ом·мм²/м
@@ -218,6 +221,41 @@ with st.sidebar:
             help="Ток намагничивания в точке U*.")
         
         vah_data = {'u_star': u_star_input, 'i0_star': i0_star_input}
+          st.subheader("Метод по характеристике намагничивания (опционально)")
+    use_bn = st.checkbox(
+        "Использовать метод по характеристике намагничивания (п. 5.4)", value=False,
+        help="Метод использует характеристику B(H) для более точного расчёта. "
+             "Требует дополнительных данных ТТ.")
+    
+    bn_data = None
+    bn_params = None
+    if use_bn:
+        st.markdown("**Параметры магнитопровода ТТ:**")
+        w2_input = st.number_input(
+            "w2 — число витков вторичной обмотки", min_value=10,
+            value=2000, step=100,
+            help="Число витков вторичной обмотки ТТ.")
+        s_input = st.number_input(
+            "s — сечение сердечника, см²", min_value=1.0,
+            value=20.0, step=1.0,
+            help="Поперечное сечение сердечника магнитопровода.")
+        l_input = st.number_input(
+            "l — средняя длина силовой линии, м", min_value=0.1,
+            value=1.0, step=0.1,
+            help="Средняя длина магнитной силовой линии.")
+        
+        st.markdown("**Типовая характеристика намагничивания B(H):**")
+        b_sat_input = st.number_input(
+            "Bнас — индукция насыщения, Тл", min_value=1.0, max_value=2.5,
+            value=1.8, step=0.1,
+            help="Магнитная индукция насыщения (для электротехнической стали ~1.8 Тл).")
+        h_knee_input = st.number_input(
+            "Hколено — напряжённость начала насыщения, А/м", min_value=10,
+            value=100, step=10,
+            help="Напряжённость магнитного поля в точке перегиба характеристики.")
+        
+        bn_data = build_bn_default(b_sat_input, h_knee_input)
+        bn_params = {'w2': w2_input, 's': s_input * 1e-4, 'l': l_input}  # s в м²
 
 # ---------------------------------------------------------------------------
 # Формирование нагрузки вторичной цепи и расчёт
@@ -268,6 +306,21 @@ try:
                     vah_res[key].method = "vah"
                     vah_res[key].notes.insert(0, f"Метод по ВАХ: A = {a_vah:.3f} (формула 19)")
                 results[0][2].update(vah_res)
+
+              # Если включён метод по характеристике намагничивания
+        if use_bn and bn_data and bn_params:
+            valid_bn, msg_bn = validate_bn_usage(ct3, kz3, bn_data, bn_params['w2'], bn_params['s'])
+            if valid_bn:
+                a_bn = calc_a_from_bn(ct3, kz3, bn_data, bn_params['w2'], bn_params['s'])
+                from methods.gost_58669 import _graphic
+                bn_res = {
+                    "bn_without_residual": _graphic(ct3, kz3, 0.0, a_bn, theta_override),
+                    "bn_with_residual": _graphic(ct3, kz3, K_R_PRED, a_bn, theta_override),
+                }
+                for key in BN_KEYS:
+                    bn_res[key].method = "bn"
+                    bn_res[key].notes.insert(0, f"Метод по B(H): A = {a_bn:.3f} (формула 23)")
+                results[0][2].update(bn_res)
         
         if use_kz1:
             ct1 = CTParams(i1_nom, i2_nom, k_nom, s_nom, cos_phi, r2, x2, r_n1, x_load)
@@ -432,7 +485,57 @@ def render_kpr_chart(ct_m, kz, gres, eff):
         st.line_chart(wide)
     st.caption(f"Зелёная пунктирная линия — уровень насыщения A·(1−K_r) = {eff:.3f}; "
                "точка пересечения с кривой и есть время до насыщения t_нас.")
-
+        # Метод по характеристике намагничивания
+        if use_bn and bn_data and bn_params:
+            st.markdown("#### Метод по характеристике намагничивания (п. 5.4)")
+            valid_bn, msg_bn = validate_bn_usage(ct_m, kz, bn_data, bn_params['w2'], bn_params['s'])
+            if valid_bn:
+                st.success(f"✅ {msg_bn}")
+                bn_rows = []
+                for k in BN_KEYS:
+                    r = res.get(k)
+                    if r is None:
+                        continue
+                    extra = ""
+                    if r.status == ST_OK and r.theta_star is not None:
+                        tag = "θ (вручную)" if r.theta_manual else "θ*"
+                        extra = f"   ({tag} = {math.degrees(r.theta_star):.1f}°)"
+                    bn_rows.append({
+                        "Сценарий": "Без остаточной намагниченности" if "without" in k else f"С K_r = {K_R_PRED}",
+                        "Время до насыщения": fmt_t(r) + extra,
+                    })
+                st.table(bn_rows)
+                
+                # Примечания
+                for k in BN_KEYS:
+                    r = res.get(k)
+                    if r is None:
+                        continue
+                    for note in r.notes:
+                        if note not in seen:
+                            seen.add(note)
+                            st.caption(f"• {note}")
+                
+                # График B(H)
+                with st.expander("📈 Характеристика намагничивания B(H)", expanded=False):
+                    df_bn = pd.DataFrame({
+                        "H, А/м": bn_data['h'],
+                        "B, Тл": bn_data['b'],
+                    })
+                    try:
+                        import altair as alt
+                        chart_bn = alt.Chart(df_bn).mark_line(strokeWidth=2, color="#9467bd").encode(
+                            x=alt.X("H, А/м:Q", title="Напряжённость магнитного поля H, А/м"),
+                            y=alt.Y("B, Тл:Q", title="Магнитная индукция B, Тл"),
+                            tooltip=["H, А/м:Q", "B, Тл:Q"],
+                        ).properties(title="Характеристика намагничивания B(H) (типовая)", height=300)
+                        st.altair_chart(chart_bn)
+                    except Exception as exc:
+                        st.warning(f"График B(H) недоступен ({type(exc).__name__}).")
+                    st.caption(f"Типовая B(H): Bнас = {bn_data['b_sat']:.2f} Тл, "
+                              f"Hколено = {bn_data['h_knee']:.0f} А/м.")
+            else:
+                st.warning(f"⚠️ {msg_bn}")
 
 # ---------------------------------------------------------------------------
 # Вкладки
