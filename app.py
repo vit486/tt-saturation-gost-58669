@@ -1,7 +1,257 @@
-import streamlit as st
+"""
+⚡ Проверка трансформаторов тока на насыщение при коротких замыканиях.
+Методика: ГОСТ Р 58669-2019, раздел 5.1 (аналитический метод).
 
-from methods.gost_58669 import CTParams, KZParams, calculate, K_R_PRED
-from report.docx_report import build_report
+Однофайловая сборка для упрощения деплоя на Streamlit Community Cloud.
+Структура файла:
+  1 — расчётное ядро (формулы ГОСТ);
+  2 — генерация отчёта Word;
+  3 — интерфейс.
+При расширении проекта разделы можно вынести в отдельные модули.
+"""
+
+import io
+import math
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import List, Optional
+
+import streamlit as st
+from docx import Document
+
+# ===========================================================================
+# 1. РАСЧЁТНОЕ ЯДРО — ГОСТ Р 58669-2019, аналитический метод (п. 5.1)
+# ===========================================================================
+
+OMEGA = 2.0 * math.pi * 50.0   # угловая частота, рад/с (f = 50 Гц)
+K_R_PRED = 0.86                # предельный коэффициент остаточной намагниченности (п. 5.1.3)
+T_NAS_MIN_MS = 15.0            # порог применимости аналитического метода (п. 5.1.7)
+T_P_RANGE_S = (0.03, 0.30)     # диапазон Tp универсальных характеристик (приложение Б)
+
+
+@dataclass
+class CTParams:
+    """Паспортные данные трансформатора тока."""
+    i1_nom: float          # номинальный первичный ток, А
+    i2_nom: float          # номинальный вторичный ток, А
+    k_nom: float           # номинальная предельная кратность
+    s_nom: float           # номинальная мощность вторичной нагрузки, ВА
+    cos_phi_nom: float     # коэффициент мощности номинальной нагрузки
+    r2: float              # активное сопротивление вторичной обмотки, Ом
+    x2: float              # индуктивное сопротивление вторичной обмотки, Ом
+    r_load_fact: float     # фактическое активное сопротивление нагрузки, Ом
+    x_load_fact: float     # фактическое индуктивное сопротивление нагрузки, Ом
+
+    @property
+    def z_n_nom(self) -> float:
+        """Полное сопротивление номинальной нагрузки, Ом."""
+        return self.s_nom / (self.i2_nom ** 2)
+
+    @property
+    def z2_sigma_nom(self) -> float:
+        """Номинальное полное сопротивление вторичной нагрузки ТТ, Ом (формула 10)."""
+        sin_phi = math.sqrt(max(0.0, 1.0 - self.cos_phi_nom ** 2))
+        return math.sqrt(
+            (self.r2 + self.z_n_nom * self.cos_phi_nom) ** 2
+            + (self.x2 + self.z_n_nom * sin_phi) ** 2
+        )
+
+    @property
+    def z2_sigma(self) -> float:
+        """Полное сопротивление ветви вторичного тока, Ом (формула 11)."""
+        return math.sqrt(
+            (self.r2 + self.r_load_fact) ** 2
+            + (self.x2 + self.x_load_fact) ** 2
+        )
+
+
+@dataclass
+class KZParams:
+    """Параметры короткого замыкания."""
+    i_kz: float            # действующее значение тока КЗ (первичная сторона), А
+    t_p: float             # постоянная времени затухания апериодической составляющей, с
+    label: str = "трёхфазное КЗ"
+
+
+@dataclass
+class SaturationResult:
+    """Результат для одного режима КЗ и одного значения остаточной намагниченности."""
+    a: float                            # параметр режима, формула (9)
+    k_r: float                          # коэффициент остаточной намагниченности
+    status: str                         # ok | no_saturation | steady_saturation | graphic_required
+    t_nas: Optional[float]              # время до насыщения, с (только при status == "ok")
+    notes: List[str] = field(default_factory=list)
+
+
+def _calc_one_mode(ct: CTParams, kz: KZParams, k_r: float) -> SaturationResult:
+    """Расчёт времени до насыщения для заданного коэффициента остаточной намагниченности."""
+    notes: List[str] = []
+
+    if kz.i_kz <= 0:
+        raise ValueError("Ток КЗ должен быть больше нуля.")
+    if ct.z2_sigma == 0:
+        raise ValueError(
+            "Полное сопротивление вторичной цепи равно нулю — проверьте исходные данные."
+        )
+
+    # Параметр режима A — формула (9)
+    a = (ct.i1_nom * ct.k_nom * ct.z2_sigma_nom) / (kz.i_kz * ct.z2_sigma)
+
+    # Приложение Б: универсальные характеристики построены для Tp = 30–300 мс
+    if not (T_P_RANGE_S[0] <= kz.t_p <= T_P_RANGE_S[1]):
+        notes.append(
+            f"T_p = {kz.t_p * 1000:.0f} мс выходит за диапазон "
+            f"{T_P_RANGE_S[0] * 1000:.0f}–{T_P_RANGE_S[1] * 1000:.0f} мс, "
+            "для которого построены универсальные характеристики (приложение Б)."
+        )
+
+    effective = a * (1.0 - k_r)
+
+    # Условие (5): A > 1 — только для варианта без остаточной намагниченности
+    if k_r == 0.0 and a <= 1.0:
+        notes.append(
+            "Условие (5) ГОСТ не выполняется: A ≤ 1 — действующий ток КЗ превышает "
+            "ток предельной кратности ТТ. Эксплуатация ТТ в таких условиях недопустима."
+        )
+        return SaturationResult(a, k_r, "steady_saturation", 0.0, notes)
+
+    # Условие (8): A*(1-Kr) > 1, иначе формула даёт отрицательное время
+    if effective <= 1.0:
+        notes.append(
+            "Условие (8) ГОСТ не выполняется: A·(1−K_r) ≤ 1 — аналитический метод "
+            "неприменим. Согласно п. 5.1.5 следует использовать графический метод "
+            "по паспортным данным или по ВАХ."
+        )
+        return SaturationResult(a, k_r, "graphic_required", None, notes)
+
+    # Условие (7): если не выполняется — насыщения нет
+    denom = OMEGA * kz.t_p + 1.0 - effective
+    if denom <= 0.0:
+        notes.append(
+            "Условие (7) ГОСТ не выполняется: ω·T_p + 1 ≤ A·(1−K_r) — "
+            "насыщение магнитопровода в переходном процессе отсутствует."
+        )
+        return SaturationResult(a, k_r, "no_saturation", None, notes)
+
+    # Формулы (3)/(6)
+    t_nas = kz.t_p * math.log((OMEGA * kz.t_p + 1.0) / denom)
+
+    # Пункт 5.1.7
+    if t_nas * 1000.0 < T_NAS_MIN_MS:
+        notes.append(
+            f"t_нас = {t_nas * 1000:.1f} мс < {T_NAS_MIN_MS:.0f} мс — согласно п. 5.1.7 "
+            "результат следует уточнить графическим методом по паспортным данным."
+        )
+
+    return SaturationResult(a, k_r, "ok", t_nas, notes)
+
+
+def calculate(ct: CTParams, kz: KZParams) -> dict:
+    """Расчёт для обоих вариантов остаточной намагниченности (п. 4.3 ГОСТ)."""
+    return {
+        "without_residual": _calc_one_mode(ct, kz, 0.0),
+        "with_residual": _calc_one_mode(ct, kz, K_R_PRED),
+    }
+
+
+# ===========================================================================
+# 2. ГЕНЕРАЦИЯ ОТЧЁТА WORD
+# ===========================================================================
+
+def fmt_t(res: SaturationResult) -> str:
+    if res.status == "ok":
+        return f"{res.t_nas * 1000:.1f} мс"
+    if res.status == "no_saturation":
+        return "насыщение отсутствует"
+    if res.status == "steady_saturation":
+        return "насыщение в установившемся режиме"
+    return "требуется графический метод"
+
+
+def _add_table(doc, headers, rows):
+    table = doc.add_table(rows=1, cols=len(headers))
+    table.style = "Light Grid Accent 1"
+    for i, h in enumerate(headers):
+        table.rows[0].cells[i].text = str(h)
+    for row in rows:
+        cells = table.add_row().cells
+        for i, v in enumerate(row):
+            cells[i].text = str(v)
+    return table
+
+
+def build_report(ct, results, verdict_lines, verdict, t_req_ms) -> bytes:
+    """Формирует байты .docx-файла."""
+    doc = Document()
+    doc.add_heading("Отчёт о проверке трансформатора тока", 0)
+
+    p = doc.add_paragraph()
+    p.add_run("Дата формирования: ").bold = True
+    p.add_run(datetime.now().strftime("%d.%m.%Y %H:%M"))
+    doc.add_paragraph(
+        "Определение времени до насыщения аналитическим методом по ГОСТ Р 58669-2019 "
+        "(раздел 5.1). Расчёт выполнен без остаточной намагниченности и с предельной "
+        f"остаточной намагниченностью K_r = {K_R_PRED} (п. 4.3, п. 5.1.3)."
+    )
+
+    doc.add_heading("1. Исходные данные", level=1)
+    _add_table(doc, ["Параметр", "Значение"], [
+        ("Номинальный первичный ток I1ном", f"{ct.i1_nom:g} А"),
+        ("Номинальный вторичный ток I2ном", f"{ct.i2_nom:g} А"),
+        ("Номинальная предельная кратность Kном", f"{ct.k_nom:g}"),
+        ("Номинальная мощность вторичной нагрузки Sном", f"{ct.s_nom:g} ВА"),
+        ("Коэффициент мощности нагрузки cos φном", f"{ct.cos_phi_nom:g}"),
+        ("Активное сопротивление вторичной обмотки R2", f"{ct.r2:g} Ом"),
+        ("Индуктивное сопротивление вторичной обмотки X2", f"{ct.x2:g} Ом"),
+        ("Фактическое активное сопротивление нагрузки Rн.факт", f"{ct.r_load_fact:g} Ом"),
+        ("Фактическое индуктивное сопротивление нагрузки Xн.факт", f"{ct.x_load_fact:g} Ом"),
+        ("Требуемое время до насыщения", f"{t_req_ms:g} мс" if t_req_ms else "не задано"),
+    ])
+
+    doc.add_heading("2. Промежуточные величины", level=1)
+    _add_table(doc, ["Величина", "Значение"], [
+        ("Сопротивление номинальной нагрузки zн.ном = Sном / I2ном²", f"{ct.z_n_nom:.4f} Ом"),
+        ("Номинальное полное сопротивление z2Σном (формула 10)", f"{ct.z2_sigma_nom:.4f} Ом"),
+        ("Полное сопротивление ветви вторичного тока z2Σ (формула 11)", f"{ct.z2_sigma:.4f} Ом"),
+    ])
+
+    for idx, (kz, res) in enumerate(results, start=3):
+        doc.add_heading(f"{idx}. Режим: {kz.label}", level=1)
+        _add_table(doc, ["Параметр", "Значение"], [
+            ("Ток КЗ (действующее значение)", f"{kz.i_kz:g} А"),
+            ("Постоянная времени T_p", f"{kz.t_p:g} с ({kz.t_p * 1000:.0f} мс)"),
+            ("Фактическая кратность Kфакт = Iкз / I1ном", f"{kz.i_kz / ct.i1_nom:.2f}"),
+        ])
+        _add_table(doc, ["Сценарий", "Параметр A", "Время до насыщения"], [
+            ("Без остаточной намагниченности (K_r = 0)",
+             f"{res['without_residual'].a:.3f}", fmt_t(res["without_residual"])),
+            (f"С предельной остаточной намагниченностью (K_r = {K_R_PRED})",
+             f"{res['with_residual'].a:.3f}", fmt_t(res["with_residual"])),
+        ])
+        for key in ("without_residual", "with_residual"):
+            for note in res[key].notes:
+                doc.add_paragraph(note, style="List Bullet")
+
+    doc.add_heading("Вывод", level=1)
+    label = {
+        "success": "ТТ проходит проверку.",
+        "warning": "ТТ проходит проверку с замечаниями.",
+        "danger": "ТТ проверку не проходит.",
+    }.get(verdict, "")
+    if label:
+        p = doc.add_paragraph()
+        p.add_run(label).bold = True
+    for line in verdict_lines:
+        doc.add_paragraph(line, style="List Bullet")
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+# ===========================================================================
+# 3. ИНТЕРФЕЙС
+# ===========================================================================
 
 st.set_page_config(
     page_title="Проверка ТТ — ГОСТ Р 58669-2019",
@@ -12,17 +262,17 @@ st.set_page_config(
 st.title("⚡ Проверка трансформаторов тока")
 st.caption("Насыщение при КЗ · ГОСТ Р 58669-2019 · аналитический метод")
 
-# ---------------------------------------------------------------------------
 # Пресеты ТТ — задел под будущую базу типовых трансформаторов
-# ---------------------------------------------------------------------------
 PRESETS = {
     "— ввести вручную —": {},
     "Пример: ТОЛ-10 600/5 10P10 15 ВА": dict(
         i1_nom=600.0, i2_nom=5.0, k_nom=10.0, s_nom=15.0, cos_phi_nom=0.8,
-        r2=0.12, x2=0.0, r_load_fact=0.35, x_load_fact=0.0),
+        r2=0.12, x2=0.0, r_load_fact=0.35, x_load_fact=0.0,
+    ),
     "Пример: ТФЗМ-110 2000/5 10P20 30 ВА": dict(
         i1_nom=2000.0, i2_nom=5.0, k_nom=20.0, s_nom=30.0, cos_phi_nom=0.8,
-        r2=0.45, x2=0.0, r_load_fact=0.8, x_load_fact=0.0),
+        r2=0.45, x2=0.0, r_load_fact=0.8, x_load_fact=0.0,
+    ),
 }
 
 with st.sidebar:
@@ -32,44 +282,55 @@ with st.sidebar:
     preset = PRESETS[preset_name]
 
     st.subheader("Паспортные данные ТТ")
-    i1_nom = st.number_input("I1ном, А", min_value=1.0, value=float(preset.get("i1_nom", 1000.0)),
-                             step=50.0, key=f"{preset_name}_i1")
-    i2_nom = st.selectbox("I2ном, А", (1.0, 2.0, 5.0),
-                          index=(1.0, 2.0, 5.0).index(float(preset.get("i2_nom", 5.0))),
-                          key=f"{preset_name}_i2")
-    k_nom = st.number_input("Kном (предельная кратность)", min_value=1.0,
-                            value=float(preset.get("k_nom", 10.0)), step=1.0, key=f"{preset_name}_k")
-    s_nom = st.number_input("Sном вторичной нагрузки, ВА", min_value=1.0,
-                            value=float(preset.get("s_nom", 15.0)), step=1.0, key=f"{preset_name}_s")
-    cos_phi = st.slider("cos φ ном. нагрузки", 0.1, 1.0,
-                        float(preset.get("cos_phi_nom", 0.8)), 0.05, key=f"{preset_name}_cos")
-    r2 = st.number_input("R2 вторичной обмотки, Ом", min_value=0.0,
-                         value=float(preset.get("r2", 0.15)), step=0.01, format="%.3f",
-                         key=f"{preset_name}_r2")
-    x2 = st.number_input("X2 вторичной обмотки, Ом", min_value=0.0,
-                         value=float(preset.get("x2", 0.0)), step=0.01, format="%.3f",
-                         key=f"{preset_name}_x2")
+    i1_nom = st.number_input(
+        "I1ном, А", min_value=1.0, value=float(preset.get("i1_nom", 1000.0)),
+        step=50.0, key=f"{preset_name}_i1")
+    i2_nom = st.selectbox(
+        "I2ном, А", (1.0, 2.0, 5.0),
+        index=(1.0, 2.0, 5.0).index(float(preset.get("i2_nom", 5.0))),
+        key=f"{preset_name}_i2")
+    k_nom = st.number_input(
+        "Kном (предельная кратность)", min_value=1.0,
+        value=float(preset.get("k_nom", 10.0)), step=1.0, key=f"{preset_name}_k")
+    s_nom = st.number_input(
+        "Sном вторичной нагрузки, ВА", min_value=1.0,
+        value=float(preset.get("s_nom", 15.0)), step=1.0, key=f"{preset_name}_s")
+    cos_phi = st.slider(
+        "cos φ ном. нагрузки", 0.1, 1.0,
+        float(preset.get("cos_phi_nom", 0.8)), 0.05, key=f"{preset_name}_cos")
+    r2 = st.number_input(
+        "R2 вторичной обмотки, Ом", min_value=0.0,
+        value=float(preset.get("r2", 0.15)), step=0.01, format="%.3f",
+        key=f"{preset_name}_r2")
+    x2 = st.number_input(
+        "X2 вторичной обмотки, Ом", min_value=0.0,
+        value=float(preset.get("x2", 0.0)), step=0.01, format="%.3f",
+        key=f"{preset_name}_x2")
 
     st.subheader("Фактическая нагрузка")
-    r_load = st.number_input("Rн.факт, Ом", min_value=0.0,
-                             value=float(preset.get("r_load_fact", 0.5)), step=0.01,
-                             format="%.3f", key=f"{preset_name}_rl")
-    x_load = st.number_input("Xн.факт, Ом", min_value=0.0,
-                             value=float(preset.get("x_load_fact", 0.0)), step=0.01,
-                             format="%.3f", key=f"{preset_name}_xl")
+    r_load = st.number_input(
+        "Rн.факт, Ом", min_value=0.0,
+        value=float(preset.get("r_load_fact", 0.5)), step=0.01, format="%.3f",
+        key=f"{preset_name}_rl")
+    x_load = st.number_input(
+        "Xн.факт, Ом", min_value=0.0,
+        value=float(preset.get("x_load_fact", 0.0)), step=0.01, format="%.3f",
+        key=f"{preset_name}_xl")
 
     st.subheader("Короткое замыкание")
     i_kz3 = st.number_input("Iкз(3), А", min_value=1.0, value=15000.0, step=100.0)
-    tp3 = st.number_input("Tр.экв для трёхфазного КЗ, с", min_value=0.001, value=0.05,
-                          step=0.005, format="%.3f")
+    tp3 = st.number_input(
+        "Tр.экв для трёхфазного КЗ, с", min_value=0.001, value=0.05,
+        step=0.005, format="%.3f")
     st.caption("Например: 0.05 с = 50 мс")
 
     use_kz1 = st.checkbox("Добавить расчёт для однофазного КЗ (п. 4.2.4 ГОСТ)")
     i_kz1 = tp1 = None
     if use_kz1:
         i_kz1 = st.number_input("Iкз(1), А", min_value=1.0, value=12000.0, step=100.0)
-        tp1 = st.number_input("Tр.экв для однофазного КЗ, с", min_value=0.001, value=0.05,
-                              step=0.005, format="%.3f")
+        tp1 = st.number_input(
+            "Tр.экв для однофазного КЗ, с", min_value=0.001, value=0.05,
+            step=0.005, format="%.3f")
 
     st.subheader("Критерий проверки")
     t_req = st.number_input(
@@ -94,10 +355,12 @@ except ValueError as e:
 
 
 def build_verdict(res_list, t_req_ms):
-    """Итоговый вывод: минимальное время по всем режимам и сценариям (п. 4.2.4)."""
+    """Итоговый вывод: минимум по всем режимам и сценариям (п. 4.2.4 ГОСТ)."""
     lines = []
-    steady = any(r["without_residual"].status == "steady_saturation" for _, r in res_list)
+    steady = any(r.status == "steady_saturation" for _, res in res_list for r in res.values())
     t_values = [r.t_nas for _, res in res_list for r in res.values() if r.status == "ok"]
+    graphic_needed = any(r.status == "graphic_required"
+                         for _, res in res_list for r in res.values())
 
     if steady:
         verdict = "danger"
@@ -106,8 +369,13 @@ def build_verdict(res_list, t_req_ms):
         lines.append("Рекомендация: выбрать ТТ с большей Kном или большим коэффициентом "
                      "трансформации, либо уменьшить вторичную нагрузку.")
     elif not t_values:
-        verdict = "success"
-        lines.append("Во всех расчётных режимах насыщение магнитопровода отсутствует.")
+        if graphic_needed:
+            verdict = "warning"
+            lines.append("Аналитический метод неприменим ни в одном сценарии — "
+                         "требуется графический метод (п. 5.1.5 ГОСТ).")
+        else:
+            verdict = "success"
+            lines.append("Во всех расчётных режимах насыщение магнитопровода отсутствует.")
     else:
         t_min_ms = min(t_values) * 1000.0
         lines.append(f"Наименьшее время до насыщения по всем режимам и сценариям: "
@@ -123,6 +391,11 @@ def build_verdict(res_list, t_req_ms):
                              "уменьшить сопротивление вторичной цепи.")
         else:
             verdict = "success"
+        if verdict == "success" and graphic_needed:
+            verdict = "warning"
+            lines.append("Для сценария с остаточной намагниченностью аналитический метод "
+                         "неприменим (п. 5.1.5) — при необходимости уточните результат "
+                         "графическим методом.")
     return verdict, lines
 
 
@@ -163,14 +436,14 @@ with tab_calc:
                 t_str = "требуется графический метод"
             rows.append({"Сценарий": name, "Параметр A": round(r.a, 3),
                          "Время до насыщения": t_str})
-        st.dataframe(rows, hide_index=True, use_container_width=True)
+        st.table(rows)
 
         for key in ("without_residual", "with_residual"):
             for note in res[key].notes:
                 st.caption(f"• {note}")
 
     with st.expander("🔍 Промежуточные величины"):
-        st.write(
+        st.markdown(
             f"- zн.ном = Sном / I2ном² = **{ct.z_n_nom:.4f} Ом**\n"
             f"- z2Σном (формула 10) = **{ct.z2_sigma_nom:.4f} Ом**\n"
             f"- z2Σ (формула 11) = **{ct.z2_sigma:.4f} Ом**\n"
@@ -178,46 +451,43 @@ with tab_calc:
         )
 
     st.divider()
-    report_bytes = build_report(ct, kz_list, results, verdict_lines, verdict, t_req)
+    report_bytes = build_report(ct, results, verdict_lines, verdict, t_req)
     st.download_button(
         "📄 Скачать отчёт (.docx)",
         data=report_bytes,
-        file_name=f"Otchet_TT_GOST_58669_{__import__('datetime').datetime.now():%Y%m%d_%H%M}.docx",
+        file_name=f"Otchet_TT_GOST_58669_{datetime.now():%Y%m%d_%H%M}.docx",
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
 
 with tab_theory:
-    st.markdown("""
-### Аналитический метод (раздел 5.1 ГОСТ Р 58669-2019)
-
-**1. Сопротивления вторичной цепи**
-
-Номинальная нагрузка: `zн.ном = Sном / I2ном²`
-
-Номинальное полное сопротивление вторичной нагрузки ТТ (формула 10):
-""")
-    st.latex(r"z_{2\Sigma\,ном} = \sqrt{(R_2 + z_{н.ном}\cos\varphi_{ном})^2 + "
-             r"(X_2 + z_{н.ном}\sin\varphi_{ном})^2}")
+    st.markdown("### Аналитический метод (раздел 5.1 ГОСТ Р 58669-2019)")
+    st.markdown("**1. Сопротивления вторичной цепи.** Номинальная нагрузка: "
+                "`zн.ном = Sном / I2ном²`. Номинальное полное сопротивление "
+                "вторичной нагрузки ТТ (формула 10):")
+    st.latex(r"z_{2\Sigma\,nom} = \sqrt{(R_2 + z_{n\,nom}\cos\varphi_{nom})^2 + "
+             r"(X_2 + z_{n\,nom}\sin\varphi_{nom})^2}")
     st.markdown("Полное сопротивление ветви вторичного тока (формула 11):")
-    st.latex(r"z_{2\Sigma} = \sqrt{(R_2 + R_{н.факт})^2 + (X_2 + X_{н.факт})^2}")
+    st.latex(r"z_{2\Sigma} = \sqrt{(R_2 + R_{fact})^2 + (X_2 + X_{fact})^2}")
 
-    st.markdown("**2. Параметр режима A (формула 9)** — отношение потокосцепления насыщения "
-                "к амплитуде потокосцепления от периодической составляющей тока КЗ:")
-    st.latex(r"A = \frac{I_{1ном} \cdot K_{ном} \cdot z_{2\Sigma\,ном}}{I_{КЗ} \cdot z_{2\Sigma}}")
+    st.markdown("**2. Параметр режима A (формула 9)** — отношение потокосцепления "
+                "насыщения к амплитуде потокосцепления от периодической составляющей тока КЗ:")
+    st.latex(r"A = \frac{I_{1nom} \cdot K_{nom} \cdot z_{2\Sigma\,nom}}"
+             r"{I_{KZ} \cdot z_{2\Sigma}}")
 
-    st.markdown("**3. Время до насыщения**")
-    st.markdown(f"Без остаточной намагниченности (формула 3) и с предельной остаточной "
-                f"намагниченностью K_r = {K_R_PRED} (формула 6):")
-    st.latex(r"t_{нас} = T_p \cdot \ln\frac{\omega T_p + 1}{\omega T_p + 1 - A(1 - K_r)}")
+    st.markdown("**3. Время до насыщения** — без остаточной намагниченности "
+                "(формула 3) и с предельной остаточной намагниченностью "
+                f"K_r = {K_R_PRED} (формула 6):")
+    st.latex(r"t_{nas} = T_p \cdot \ln\frac{\omega T_p + 1}"
+             r"{\omega T_p + 1 - A(1 - K_r)}")
 
     st.markdown("""
 **4. Проверяемые условия**
 
 | Условие | Смысл | Действие при нарушении |
 |---|---|---|
-| A > 1 (5) | ток предельной кратности больше тока КЗ | эксплуатация ТТ недопустима |
-| A·(1−K_r) > 1 (8) | применимость формулы (6) | графический метод (п. 5.1.5) |
-| ω·T_p + 1 > A·(1−K_r) (7) | наличие насыщения | насыщения нет, t_нас = ∞ |
+| A > 1 (условие 5) | ток предельной кратности больше тока КЗ | эксплуатация ТТ недопустима |
+| A·(1−K_r) > 1 (условие 8) | применимость формулы времени | графический метод (п. 5.1.5) |
+| ω·T_p + 1 > A·(1−K_r) (условие 7) | наличие насыщения | насыщения нет, t_нас = ∞ |
 | t_нас ≥ 15 мс (п. 5.1.7) | точность аналитического метода | уточнить графическим методом |
 
 Расчёт выполняется для трёхфазного и (в сетях с глухозаземлённой нейтралью) однофазного КЗ;
@@ -230,16 +500,16 @@ with tab_about:
 в соответствии с **ГОСТ Р 58669-2019** (аналитический метод, раздел 5.1).
 
 **Ограничения текущего релиза:**
-- только аналитический метод (графические методы по универсальным характеристикам, ВАХ
-  и характеристике намагничивания — в планах);
+- только аналитический метод (графические методы по универсальным характеристикам,
+  ВАХ и характеристике намагничивания — в планах);
 - только ТТ классов точности P / PX / TPX с замкнутым магнитопроводом.
 
 **Планы развития:**
-- проверка ТТ по 10%-й погрешности (ГОСТ 7746);
-- выбор ТТ из базы типовых моделей;
 - графический метод по универсальным характеристикам (приложение Б);
+- проверка ТТ по 10%-й погрешности (ГОСТ 7746);
+- база типовых ТТ с возможностью выбора;
 - поддержка ГОСТ Р 71879-2024.
 
-Архитектура модульная: новые методики добавляются отдельными файлами в пакет `methods/`
-без изменения интерфейса.
+Код структурирован по разделам (расчётное ядро / отчёт / интерфейс), что позволяет
+добавлять новые методики отдельными блоками без переписывания интерфейса.
 """)
