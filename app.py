@@ -202,7 +202,35 @@ with st.sidebar:
     t_req = st.number_input("Требуемое t_нас, мс (0 — не проверять)", 0.0, 500.0, 0.0, 5.0,
                             help="Минимально необходимое время до насыщения по требованиям "
                                  "РЗА (например, время отключения КЗ с запасом).")
-
+    st.subheader("Метод по ВАХ (опционально)")
+    use_vah = st.checkbox(
+        "Использовать метод по ВАХ (п. 5.3)", value=False,
+        help="Метод позволяет точнее определить время до насыщения, если известна "
+             "вольт-амперная характеристика ТТ. Требует проверки условия (16) ГОСТ.")
+    
+    vah_data = None
+    if use_vah:
+        st.markdown("**Параметры типовой ВАХ** (можно скорректировать по фактическим данным):")
+        u_star_input = st.number_input(
+            "U* — напряжение при полной погрешности ε, В", min_value=1.0,
+            value=100.0, step=10.0,
+            help="Напряжение на выводах вторичной обмотки при токе намагничивания, "
+                 "соответствующем полной погрешности ТТ (обычно при 10% погрешности).")
+        i0_star_input = st.number_input(
+            "I₀* — ток намагничивания при U*, А", min_value=0.001,
+            value=1.0, step=0.1, format="%.3f",
+            help="Ток намагничивания в точке U*.")
+        
+        # Проверка условия (16)
+        ct_temp = CTParams(i1_nom, i2_nom, k_nom, s_nom, cos_phi, r2, x2, r_n3, x_load)
+        kz_temp = KZParams(i_kz3, tp3, "трёхфазное КЗ")
+        valid, msg = validate_vah_usage(u_star_input, i0_star_input, ct_temp, kz_temp)
+        if valid:
+            st.success(f"✅ {msg}")
+        else:
+            st.warning(f"⚠️ {msg}")
+        
+        vah_data = {'u_star': u_star_input, 'i0_star': i0_star_input}
 # ---------------------------------------------------------------------------
 # Формирование нагрузки вторичной цепи и расчёт
 # ---------------------------------------------------------------------------
@@ -231,82 +259,23 @@ kz3 = KZParams(i_kz3, tp3, "трёхфазное КЗ")
 try:
     with st.spinner("Расчёт времени до насыщения…"):
         results = [(ct3, kz3, calculate(ct3, kz3, method, theta_override))]
+        
+        # Если включён метод по ВАХ, добавляем его результаты
+        if use_vah and vah_data:
+            vah_res = _vah_method(ct3, kz3, vah_data['u_star'], vah_data['i0_star'], theta_override)
+            results[0][2].update(vah_res)
+        
         if use_kz1:
             ct1 = CTParams(i1_nom, i2_nom, k_nom, s_nom, cos_phi, r2, x2, r_n1, x_load)
             kz1 = KZParams(i_kz1, tp1, "однофазное КЗ")
-            results.append((ct1, kz1, calculate(ct1, kz1, method, theta_override)))
+            res1 = calculate(ct1, kz1, method, theta_override)
+            if use_vah and vah_data:
+                vah_res1 = _vah_method(ct1, kz1, vah_data['u_star'], vah_data['i0_star'], theta_override)
+                res1.update(vah_res1)
+            results.append((ct1, kz1, res1))
 except ValueError as e:
     st.error(f"Ошибка исходных данных: {e}")
     st.stop()
-
-keys = METHOD_KEYS[method]
-
-
-def fmt_t(res) -> str:
-    if res is None:
-        return "—"
-    if res.status == ST_OK and res.t_nas is not None:
-        return f"{res.t_nas * 1000:.2f} мс"
-    if res.status == ST_NO_SAT:
-        return "∞ — насыщения нет"
-    if res.status == ST_STEADY:
-        return "0 мс — насыщение в установившемся режиме"
-    if res.status == ST_GRAPHIC_REQUIRED:
-        return "неприменим (усл. 8) — см. графический метод"
-    return "—"
-
-
-def build_verdict(res_list, t_req_ms, active_keys, use_method):
-    """Итоговый вывод: минимум по всем режимам и сценариям (п. 4.2.4 ГОСТ)."""
-    lines, t_values = [], []
-    steady = any(res[k].status == ST_STEADY for _, _, res in res_list for k in ANALYTIC_KEYS
-                 if res[k].k_r == 0.0)
-    graphic_needed = any(res[k].status == ST_GRAPHIC_REQUIRED for _, _, res in res_list
-                         for k in ANALYTIC_KEYS)
-    for _, _, res in res_list:
-        for k in active_keys:
-            r = res.get(k)
-            if r is not None and r.status == ST_OK and r.t_nas is not None:
-                t_values.append(r.t_nas)
-
-    if steady:
-        return "danger", [
-            "A ≤ 1: ток КЗ превышает ток предельной кратности ТТ — погрешность превышает "
-            "допустимую уже в установившемся режиме. Эксплуатация недопустима.",
-            "Рекомендация: выбрать ТТ с большей Kном или большим коэффициентом "
-            "трансформации, либо уменьшить вторичную нагрузку (сечение кабеля, число приборов)."]
-
-    if not t_values:
-        return "success", ["Во всех расчётных режимах насыщение магнитопровода отсутствует."]
-
-    t_min_ms = min(t_values) * 1000.0
-    lines.append(f"Наименьшее время до насыщения по всем режимам и сценариям: {t_min_ms:.2f} мс.")
-    verdict = "success"
-    if t_req_ms > 0:
-        if t_min_ms >= t_req_ms:
-            lines.append(f"Требование выполняется: {t_min_ms:.2f} мс ≥ {t_req_ms:g} мс.")
-        else:
-            verdict = "danger"
-            lines.append(f"Требование НЕ выполняется: {t_min_ms:.2f} мс < {t_req_ms:g} мс.")
-            lines.append("Рекомендация: выбрать ТТ с большей Kном или Sном, либо уменьшить "
-                         "сопротивление вторичной цепи (увеличить сечение кабеля, сократить длину).")
-
-    if use_method == "analytic":
-        need_warning = False
-        if graphic_needed:
-            need_warning = True
-            lines.append("Для сценария с остаточной намагниченностью аналитический метод "
-                         "неприменим (п. 5.1.5) — переключитесь на графический метод.")
-        if t_min_ms < 15.0:
-            need_warning = True
-            lines.append("t_нас < 15 мс — согласно п. 5.1.7 аналитический метод неприменим, "
-                         "переключитесь на графический метод.")
-        if need_warning and verdict != "danger":
-            verdict = "warning"
-    return verdict, lines
-
-
-verdict, verdict_lines = build_verdict(results, t_req, keys, method)
 
 
 # ---------------------------------------------------------------------------
