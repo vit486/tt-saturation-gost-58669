@@ -267,6 +267,161 @@ def calculate(ct: CTParams, kz: KZParams, method: str = "analytic",
         out["graphic_without_residual"] = _graphic(ct, kz, 0.0, a, theta_override)
         out["graphic_with_residual"] = _graphic(ct, kz, K_R_PRED, a, theta_override)
     return out
+# ---------------------------------------------------------------------------
+# МЕТОД ПО ВАХ (п. 5.3 ГОСТ Р 58669-2019)
+# ---------------------------------------------------------------------------
 
+def build_vah_default(u_star, i0_star, r2, n_points=100):
+    """Построение типовой ВАХ (вольт-амперной характеристики) ТТ.
+    
+    ВАХ описывается как U = f(I₀) — зависимость напряжения на выводах
+    вторичной обмотки от тока намагничивания.
+    
+    Типовая форма:
+    - Линейный участок: U = k · I₀ (I₀ < I₀_лин)
+    - Переходная область: плавное насыщение
+    - Насыщение: U → U_max
+    
+    Параметры:
+    - u_star: напряжение при номинальной предельной кратности (или при 10% погрешности)
+    - i0_star: ток намагничивания при u_star
+    - r2: активное сопротивление вторичной обмотки
+    - n_points: количество точек в таблице
+    
+    Возвращает:
+    - dict с массивами: {'i0': [...], 'u': [...], 'psi': [...]}
+    """
+    i0_max = i0_star * 3.0  # выходим за точку u_star для показа насыщения
+    i0_arr = np.linspace(0.001, i0_max, n_points)
+    
+    # Нормализованные координаты
+    x = i0_arr / i0_star
+    y_norm = u_star / i0_star
+    
+    # Эмпирическая формула для типовой ВАХ (аппроксимация реальных характеристик)
+    # Линейный участок + плавный переход в насыщение
+    u_arr = y_norm * i0_star * (1 - np.exp(-x)) / (1 + 0.1 * x**2)
+    u_arr = np.clip(u_arr, 0, u_star * 1.2)  # ограничение сверху
+    
+    # Потокосцепление: Ψ = U / ω
+    psi_arr = u_arr / OMEGA
+    
+    return {
+        'i0': i0_arr.tolist(),
+        'u': u_arr.tolist(),
+        'psi': psi_arr.tolist(),
+        'u_star': u_star,
+        'i0_star': i0_star,
+    }
+
+
+def calc_a_from_vah(u_star, u2sin):
+    """Параметр режима A по формуле (19) ГОСТ Р 58669-2019.
+    
+    A = U* / U2sin
+    
+    Параметры:
+    - u_star: напряжение на ВАХ, соответствующее полной погрешности ε
+    - u2sin: напряжение на вторичной обмотке при фактическом токе КЗ
+    
+    Возвращает:
+    - float: параметр A
+    """
+    if u2sin <= 0:
+        raise ValueError("U2sin должен быть больше нуля.")
+    return u_star / u2sin
+
+
+def calc_u2sin(ct, kz):
+    """Напряжение на вторичной обмотке при фактическом токе КЗ.
+    
+    U2sin = Iкз · z2Σ / Kном
+    
+    Параметры:
+    - ct: CTParams (параметры ТТ)
+    - kz: KZParams (параметры КЗ)
+    
+    Возвращает:
+    - float: U2sin в вольтах
+    """
+    k_fact = kz.i_kz / ct.i1_nom
+    return ct.i2_nom * k_fact * ct.z2_sigma
+
+
+def validate_vah_usage(u_star, i0_star, ct, kz):
+    """Проверка условия (16) ГОСТ Р 58669-2019 для применения метода по ВАХ.
+    
+    I₀(ε) / U(ε) / (Iлин / Uлин) > 3
+    
+    Где:
+    - I₀(ε) = 0,1 · I₂ном · Kфакт
+    - U(ε) — напряжение на ВАХ при I₀(ε)
+    - Iлин, Uлин — середина линейного участка ВАХ
+    
+    Для типовой ВАХ принимаем Iлин = 0,1 · I₀_star, Uлин = U(Iлин)
+    """
+    k_fact = kz.i_kz / ct.i1_nom
+    i0_eps = 0.1 * ct.i2_nom * k_fact
+    
+    # Для типовой ВАХ: линейный участок при малых токах
+    i_lin = i0_star * 0.1
+    u_lin = u_star * 0.1  # приблизительно, для линейного участка
+    
+    # Напряжение при I₀(ε) — интерполяция по типовой ВАХ
+    # Для упрощения: U(ε) ≈ u_star * (i0_eps / i0_star) для линейного участка
+    u_eps = u_star * (i0_eps / i0_star) if i0_eps <= i0_star else u_star
+    
+    # Проверка условия
+    if i_lin == 0 or u_lin == 0:
+        return False, "Невозможно определить параметры линейного участка ВАХ."
+    
+    ratio = (i0_eps / u_eps) / (i_lin / u_lin)
+    if ratio > 3:
+        return True, f"Условие (16) выполняется: отношение = {ratio:.2f} > 3."
+    else:
+        return False, f"Условие (16) не выполняется: отношение = {ratio:.2f} ≤ 3."
+
+
+def _vah_method(ct, kz, u_star, i0_star, theta_override=None):
+    """Метод по ВАХ: расчёт параметра A и времени до насыщения.
+    
+    Параметры:
+    - ct: CTParams
+    - kz: KZParams
+    - u_star: напряжение на ВАХ при полной погрешности
+    - i0_star: ток намагничивания при u_star
+    - theta_override: начальная фаза θ (None — авто)
+    
+    Возвращает:
+    - dict с результатами для обоих сценариев K_r
+    """
+    # Проверка условия (16)
+    valid, msg = validate_vah_usage(u_star, i0_star, ct, kz)
+    if not valid:
+        notes = [f"Метод по ВАХ неприменим: {msg}"]
+        return {
+            "vah_without_residual": SaturationResult(0, 0, ST_GRAPHIC_REQUIRED, None, notes, "vah"),
+            "vah_with_residual": SaturationResult(0, 0, ST_GRAPHIC_REQUIRED, None, notes, "vah"),
+        }
+    
+    # Расчёт параметра A
+    u2sin = calc_u2sin(ct, kz)
+    a = calc_a_from_vah(u_star, u2sin)
+    
+    # Графический метод с параметром A
+    out = {
+        "vah_without_residual": _graphic(ct, kz, 0.0, a, theta_override),
+        "vah_with_residual": _graphic(ct, kz, K_R_PRED, a, theta_override),
+    }
+    
+    # Добавляем пометку о методе
+    for key in ["vah_without_residual", "vah_with_residual"]:
+        out[key].method = "vah"
+        out[key].notes.insert(0, f"Метод по ВАХ: A = {a:.3f} (формула 19)")
+    
+    return out
+
+
+VAH_KEYS = ("vah_without_residual", "vah_with_residual")
 
 # === КОНЕЦ ФАЙЛА methods/gost_58669.py ===
