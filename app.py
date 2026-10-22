@@ -399,7 +399,54 @@ with tab_calc:
                 if note not in seen:
                     seen.add(note)
                     st.caption(f"• {note}")
-
+        # Метод по ВАХ
+        if use_vah and vah_data:
+            st.markdown("#### Метод по ВАХ (п. 5.3)")
+            vah_rows = []
+            for k in VAH_KEYS:
+                r = res.get(k)
+                if r is None:
+                    continue
+                extra = ""
+                if r.status == ST_OK and r.theta_star is not None:
+                    tag = "θ (вручную)" if r.theta_manual else "θ*"
+                    extra = f"   ({tag} = {math.degrees(r.theta_star):.1f}°)"
+                vah_rows.append({
+                    "Сценарий": "Без остаточной намагниченности" if "without" in k else f"С K_r = {K_R_PRED}",
+                    "Время до насыщения": fmt_t(r) + extra,
+                })
+            st.table(vah_rows)
+            
+            # Примечания
+            for k in VAH_KEYS:
+                r = res.get(k)
+                if r is None:
+                    continue
+                for note in r.notes:
+                    if note not in seen:
+                        seen.add(note)
+                        st.caption(f"• {note}")
+            
+            # График ВАХ
+            with st.expander("📈 График ВАХ", expanded=False):
+                vah_plot = build_vah_default(vah_data['u_star'], vah_data['i0_star'], ct_m.r2)
+                df_vah = pd.DataFrame({
+                    "I₀, А": vah_plot['i0'],
+                    "U, В": vah_plot['u'],
+                })
+                try:
+                    import altair as alt
+                    chart_vah = alt.Chart(df_vah).mark_line(strokeWidth=2, color="#d62728").encode(
+                        x=alt.X("I₀, А:Q", title="Ток намагничивания I₀, А"),
+                        y=alt.Y("U, В:Q", title="Напряжение U, В"),
+                        tooltip=["I₀, А:Q", "U, В:Q"],
+                    ).properties(title="Вольт-амперная характеристика ТТ (типовая)", height=300)
+                    st.altair_chart(chart_vah)
+                except Exception as exc:
+                    st.warning(f"График ВАХ недоступен ({type(exc).__name__}).")
+                st.caption(f"Типовая ВАХ построена по точкам U* = {vah_data['u_star']:.1f} В, "
+                          f"I₀* = {vah_data['i0_star']:.3f} А.")
+              
         if method in ("graphic", "both"):
             g0 = res.get("graphic_without_residual")
             gr = res.get("graphic_with_residual")
