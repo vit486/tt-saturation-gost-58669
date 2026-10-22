@@ -2,21 +2,42 @@
 from __future__ import annotations
 
 import io
+import math
 from datetime import datetime
 
 from docx import Document
 
-from methods.gost_58669 import K_R_PRED
+from methods.gost_58669 import (
+    ANALYTIC_KEYS, GRAPHIC_KEYS, K_R_PRED, ST_GRAPHIC_REQUIRED, ST_NO_SAT, ST_OK,
+    ST_STEADY,
+)
+
+METHOD_TITLES = {
+    "analytic": "аналитический метод (раздел 5.1)",
+    "graphic": "графический метод по паспортным данным (раздел 5.2)",
+    "both": "аналитический и графический методы (разделы 5.1 и 5.2)",
+}
+
+SCENARIO_TITLES = {
+    "without_residual": "без остаточной намагниченности (K_r = 0)",
+    "with_residual": f"с предельной остаточной намагниченностью (K_r = {K_R_PRED})",
+    "graphic_without_residual": "без остаточной намагниченности (K_r = 0)",
+    "graphic_with_residual": f"с предельной остаточной намагниченностью (K_r = {K_R_PRED})",
+}
 
 
 def fmt_t(res) -> str:
-    if res.status == "ok":
-        return f"{res.t_nas * 1000:.1f} мс"
-    if res.status == "no_saturation":
+    if res is None:
+        return "—"
+    if res.status == ST_OK and res.t_nas is not None:
+        return f"{res.t_nas * 1000:.2f} мс"
+    if res.status == ST_NO_SAT:
         return "насыщение отсутствует"
-    if res.status == "steady_saturation":
-        return "насыщение в установившемся режиме"
-    return "требуется графический метод"
+    if res.status == ST_STEADY:
+        return "насыщение в установившемся режиме (A ≤ 1)"
+    if res.status == ST_GRAPHIC_REQUIRED:
+        return "аналитический метод неприменим (усл. 8) — см. графический метод"
+    return "—"
 
 
 def _add_table(doc, headers, rows):
@@ -31,8 +52,16 @@ def _add_table(doc, headers, rows):
     return table
 
 
-def build_report(ct, results, verdict_lines, verdict, t_req_ms) -> bytes:
-    """Формирует байты .docx-файла."""
+def _keys_for(method: str):
+    if method == "graphic":
+        return GRAPHIC_KEYS
+    if method == "both":
+        return ANALYTIC_KEYS + GRAPHIC_KEYS
+    return ANALYTIC_KEYS
+
+
+def build_report(ct, results, verdict_lines, verdict, t_req_ms, method="analytic") -> bytes:
+    """results — список кортежей (KZParams, dict результатов calculate())."""
     doc = Document()
     doc.add_heading("Отчёт о проверке трансформатора тока", 0)
 
@@ -40,10 +69,18 @@ def build_report(ct, results, verdict_lines, verdict, t_req_ms) -> bytes:
     p.add_run("Дата формирования: ").bold = True
     p.add_run(datetime.now().strftime("%d.%m.%Y %H:%M"))
     doc.add_paragraph(
-        "Определение времени до насыщения аналитическим методом по ГОСТ Р 58669-2019 "
-        "(раздел 5.1). Расчёт выполнен без остаточной намагниченности и с предельной "
-        f"остаточной намагниченностью K_r = {K_R_PRED} (п. 4.3, п. 5.1.3)."
+        "Определение времени до насыщения при коротких замыканиях по ГОСТ Р 58669-2019, "
+        f"{METHOD_TITLES.get(method, method)}. Расчёт выполнен без остаточной "
+        f"намагниченности и с предельной остаточной намагниченностью K_r = {K_R_PRED} "
+        "(п. 4.3, п. 5.1.3)."
     )
+    if method in ("graphic", "both"):
+        doc.add_paragraph(
+            "Графический метод по паспортным данным (раздел 5.2) реализован в численной "
+            "форме: универсальные характеристики приложения Б построены по формуле (Г.15) "
+            "для начальных фаз θ, при которых время до насыщения наименьшее (п. Г.3.7), — "
+            "что и воспроизводится расчётом вместо снятия значений с чертежей."
+        )
 
     doc.add_heading("1. Исходные данные", level=1)
     _add_table(doc, ["Параметр", "Значение"], [
@@ -64,31 +101,47 @@ def build_report(ct, results, verdict_lines, verdict, t_req_ms) -> bytes:
         ("Сопротивление номинальной нагрузки zн.ном = Sном / I2ном²", f"{ct.z_n_nom:.4f} Ом"),
         ("Номинальное полное сопротивление z2Σном (формула 10)", f"{ct.z2_sigma_nom:.4f} Ом"),
         ("Полное сопротивление ветви вторичного тока z2Σ (формула 11)", f"{ct.z2_sigma:.4f} Ом"),
+        ("Угол сопротивления ветви вторичного тока α (формула 12)",
+         f"{math.degrees(ct.alpha):.2f}° (cos α = {ct.cos_alpha:.4f})"),
     ])
 
+    keys = _keys_for(method)
     for idx, (kz, res) in enumerate(results, start=3):
         doc.add_heading(f"{idx}. Режим: {kz.label}", level=1)
         _add_table(doc, ["Параметр", "Значение"], [
             ("Ток КЗ (действующее значение)", f"{kz.i_kz:g} А"),
             ("Постоянная времени T_p", f"{kz.t_p:g} с ({kz.t_p * 1000:.0f} мс)"),
             ("Фактическая кратность Kфакт = Iкз / I1ном", f"{kz.i_kz / ct.i1_nom:.2f}"),
+            ("Параметр режима A (формула 9)", f"{res[keys[0]].a:.4f}"),
         ])
-        _add_table(doc, ["Сценарий", "Параметр A", "Время до насыщения"], [
-            ("Без остаточной намагниченности (K_r = 0)",
-             f"{res['without_residual'].a:.3f}", fmt_t(res["without_residual"])),
-            (f"С предельной остаточной намагниченностью (K_r = {K_R_PRED})",
-             f"{res['with_residual'].a:.3f}", fmt_t(res["with_residual"])),
-        ])
-        for key in ("without_residual", "with_residual"):
-            for note in res[key].notes:
-                doc.add_paragraph(note, style="List Bullet")
+
+        rows = []
+        for key in keys:
+            r = res.get(key)
+            if r is None:
+                continue
+            m_name = "графический" if key in GRAPHIC_KEYS else "аналитический"
+            extra = ""
+            if key in GRAPHIC_KEYS and r.status == ST_OK and r.theta_star is not None:
+                extra = f", θ* = {math.degrees(r.theta_star):.1f}°"
+            rows.append((f"{m_name} — {SCENARIO_TITLES[key]}", f"{r.a:.4f}",
+                         f"{fmt_t(r)}{extra}"))
+        _add_table(doc, ["Метод и сценарий", "Параметр A", "Время до насыщения"], rows)
+
+        seen = set()
+        for key in keys:
+            r = res.get(key)
+            if r is None:
+                continue
+            for note in r.notes:
+                if note not in seen:
+                    seen.add(note)
+                    doc.add_paragraph(note, style="List Bullet")
 
     doc.add_heading("Вывод", level=1)
-    label = {
-        "success": "ТТ проходит проверку.",
-        "warning": "ТТ проходит проверку с замечаниями.",
-        "danger": "ТТ проверку не проходит.",
-    }.get(verdict, "")
+    label = {"success": "ТТ проходит проверку.",
+             "warning": "ТТ проходит проверку с замечаниями.",
+             "danger": "ТТ проверку не проходит."}.get(verdict, "")
     if label:
         p = doc.add_paragraph()
         p.add_run(label).bold = True
