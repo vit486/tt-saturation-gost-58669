@@ -1,9 +1,9 @@
 """
 ⚡ Проверка трансформаторов тока на насыщение при коротких замыканиях.
 Методика: ГОСТ Р 58669-2019.
-Релиз 1.5: фактическая вторичная нагрузка формируется из параметров всей
-вторичной цепи — приборы, соединительный кабель (материал, длина, сечение,
-схема соединения), переходные контакты (п. 4.2.6, Приложение А).
+Релиз 1.6: метод по ВАХ (п. 5.3 ГОСТ Р 58669-2019) — построение типовой ВАХ
+по параметрам U* и I₀*, проверка условия (16), расчёт параметра A по формуле (19),
+использование результата в графическом методе.
 
 Структура проекта:
   - app.py                        — интерфейс (вкладки, формы, результаты, графики);
@@ -20,7 +20,8 @@ import streamlit as st
 try:
     from methods.gost_58669 import (
         ANALYTIC_KEYS, CTParams, GRAPHIC_KEYS, K_R_PRED, KZParams, ST_GRAPHIC_REQUIRED,
-        ST_NO_SAT, ST_OK, ST_STEADY, build_kpr_curve, calculate,
+        ST_NO_SAT, ST_OK, ST_STEADY, build_kpr_curve, calculate, VAH_KEYS,
+        build_vah_default, validate_vah_usage, calc_a_from_vah, calc_u2sin,
     )
     from methods.reference_examples import (
         run_graphic_checks, run_method_comparison, run_self_checks,
@@ -42,7 +43,7 @@ if _IMPORT_ERROR is not None:
 | Файл | Признак целостности (поиск Ctrl+F) |
 |---|---|
 | `methods/__init__.py` | текст «Пакет расчётных методик» |
-| `methods/gost_58669.py` | `def t_nas_graphic(` |
+| `methods/gost_58669.py` | `def t_nas_graphic(` **и** `VAH_KEYS` |
 | `methods/reference_examples.py` | `def run_graphic_checks(` |
 | `report/__init__.py` | текст «Пакет генерации отчётов» |
 | `report/docx_report.py` | `def build_report(` |
@@ -63,7 +64,7 @@ st.set_page_config(page_title="Проверка ТТ — ГОСТ Р 58669-2019"
 
 st.title("⚡ Проверка трансформаторов тока")
 st.caption("Насыщение при КЗ · ГОСТ Р 58669-2019 · аналитический и графический методы "
-           "· релиз 1.5")
+           "· релиз 1.6")
 
 METHOD_OPTIONS = {
     "Аналитический (п. 5.1)": "analytic",
@@ -83,20 +84,12 @@ LBL_STAR_AUTO = "θ = θ* — расчётный минимум (п. Г.3.7)"
 LBL_ZERO = "θ = 0° — максимум апериодической составляющей"
 
 # Коэффициенты расчётной длины кабеля: (трёхфазное КЗ, однофазное КЗ)
-# Классическая методика расчёта вторичных нагрузок (РД 153-34.0-35.301-2002,
-# Приложение А ГОСТ Р 58669-2019):
-#  - полная звезда: при трёхфазном КЗ ток в нулевом проводе равен нулю (k = 1),
-#    при однофазном — обратный ток идёт по нулевому проводу (k = 2);
-#  - неполная звезда: при трёхфазном КЗ общий провод несёт ток неповреждённой
-#    фазы, сумма сопротивлений даёт k = √3; для однофазного КЗ — k = 2;
-#  - один ТТ: ток идёт по двум проводам (туда и обратно), k = 2.
 SCHEME_FACTORS = {
     "Полная звезда (3 ТТ)": (1.0, 2.0),
     "Неполная звезда (2 ТТ)": (math.sqrt(3.0), 2.0),
     "Один ТТ (токовые цепи в 2 проводах)": (2.0, 2.0),
 }
-# Удельное сопротивление жил при 20 °С (п. 4.2.1 ГОСТ 58669: сопротивления
-# приводят к нормальной температуре по ГОСТ 15150), Ом·мм²/м
+# Удельное сопротивление жил при 20 °С (п. 4.2.1 ГОСТ 58669), Ом·мм²/м
 RHO_MATERIALS = {"Медь": 0.0175, "Алюминий": 0.0281}
 
 PRESETS = {
@@ -204,6 +197,7 @@ with st.sidebar:
     t_req = st.number_input("Требуемое t_нас, мс (0 — не проверять)", 0.0, 500.0, 0.0, 5.0,
                             help="Минимально необходимое время до насыщения по требованиям "
                                  "РЗА (например, время отключения КЗ с запасом).")
+
     st.subheader("Метод по ВАХ (опционально)")
     use_vah = st.checkbox(
         "Использовать метод по ВАХ (п. 5.3)", value=False,
@@ -223,16 +217,8 @@ with st.sidebar:
             value=1.0, step=0.1, format="%.3f",
             help="Ток намагничивания в точке U*.")
         
-        # Проверка условия (16)
-        ct_temp = CTParams(i1_nom, i2_nom, k_nom, s_nom, cos_phi, r2, x2, r_n3, x_load)
-        kz_temp = KZParams(i_kz3, tp3, "трёхфазное КЗ")
-        valid, msg = validate_vah_usage(u_star_input, i0_star_input, ct_temp, kz_temp)
-        if valid:
-            st.success(f"✅ {msg}")
-        else:
-            st.warning(f"⚠️ {msg}")
-        
         vah_data = {'u_star': u_star_input, 'i0_star': i0_star_input}
+
 # ---------------------------------------------------------------------------
 # Формирование нагрузки вторичной цепи и расчёт
 # ---------------------------------------------------------------------------
@@ -264,20 +250,116 @@ try:
         
         # Если включён метод по ВАХ, добавляем его результаты
         if use_vah and vah_data:
-            vah_res = _vah_method(ct3, kz3, vah_data['u_star'], vah_data['i0_star'], theta_override)
-            results[0][2].update(vah_res)
+            # Проверка условия (16)
+            valid, msg = validate_vah_usage(vah_data['u_star'], vah_data['i0_star'], ct3, kz3)
+            if valid:
+                # Расчёт параметра A по формуле (19)
+                u2sin = calc_u2sin(ct3, kz3)
+                a_vah = calc_a_from_vah(vah_data['u_star'], u2sin)
+                
+                # Используем графический метод с параметром A из ВАХ
+                from methods.gost_58669 import _graphic
+                vah_res = {
+                    "vah_without_residual": _graphic(ct3, kz3, 0.0, a_vah, theta_override),
+                    "vah_with_residual": _graphic(ct3, kz3, K_R_PRED, a_vah, theta_override),
+                }
+                # Помечаем, что это метод по ВАХ
+                for key in VAH_KEYS:
+                    vah_res[key].method = "vah"
+                    vah_res[key].notes.insert(0, f"Метод по ВАХ: A = {a_vah:.3f} (формула 19)")
+                results[0][2].update(vah_res)
         
         if use_kz1:
             ct1 = CTParams(i1_nom, i2_nom, k_nom, s_nom, cos_phi, r2, x2, r_n1, x_load)
             kz1 = KZParams(i_kz1, tp1, "однофазное КЗ")
             res1 = calculate(ct1, kz1, method, theta_override)
             if use_vah and vah_data:
-                vah_res1 = _vah_method(ct1, kz1, vah_data['u_star'], vah_data['i0_star'], theta_override)
-                res1.update(vah_res1)
+                valid1, msg1 = validate_vah_usage(vah_data['u_star'], vah_data['i0_star'], ct1, kz1)
+                if valid1:
+                    u2sin1 = calc_u2sin(ct1, kz1)
+                    a_vah1 = calc_a_from_vah(vah_data['u_star'], u2sin1)
+                    from methods.gost_58669 import _graphic
+                    vah_res1 = {
+                        "vah_without_residual": _graphic(ct1, kz1, 0.0, a_vah1, theta_override),
+                        "vah_with_residual": _graphic(ct1, kz1, K_R_PRED, a_vah1, theta_override),
+                    }
+                    for key in VAH_KEYS:
+                        vah_res1[key].method = "vah"
+                        vah_res1[key].notes.insert(0, f"Метод по ВАХ: A = {a_vah1:.3f} (формула 19)")
+                    res1.update(vah_res1)
             results.append((ct1, kz1, res1))
 except ValueError as e:
     st.error(f"Ошибка исходных данных: {e}")
     st.stop()
+
+keys = METHOD_KEYS[method]
+
+
+def fmt_t(res) -> str:
+    if res is None:
+        return "—"
+    if res.status == ST_OK and res.t_nas is not None:
+        return f"{res.t_nas * 1000:.2f} мс"
+    if res.status == ST_NO_SAT:
+        return "∞ — насыщения нет"
+    if res.status == ST_STEADY:
+        return "0 мс — насыщение в установившемся режиме"
+    if res.status == ST_GRAPHIC_REQUIRED:
+        return "неприменим (усл. 8) — см. графический метод"
+    return "—"
+
+
+def build_verdict(res_list, t_req_ms, active_keys, use_method):
+    """Итоговый вывод: минимум по всем режимам и сценариям (п. 4.2.4 ГОСТ)."""
+    lines, t_values = [], []
+    steady = any(res[k].status == ST_STEADY for _, _, res in res_list for k in ANALYTIC_KEYS
+                 if res[k].k_r == 0.0)
+    graphic_needed = any(res[k].status == ST_GRAPHIC_REQUIRED for _, _, res in res_list
+                         for k in ANALYTIC_KEYS)
+    for _, _, res in res_list:
+        for k in active_keys:
+            r = res.get(k)
+            if r is not None and r.status == ST_OK and r.t_nas is not None:
+                t_values.append(r.t_nas)
+
+    if steady:
+        return "danger", [
+            "A ≤ 1: ток КЗ превышает ток предельной кратности ТТ — погрешность превышает "
+            "допустимую уже в установившемся режиме. Эксплуатация недопустима.",
+            "Рекомендация: выбрать ТТ с большей Kном или большим коэффициентом "
+            "трансформации, либо уменьшить вторичную нагрузку (сечение кабеля, число приборов)."]
+
+    if not t_values:
+        return "success", ["Во всех расчётных режимах насыщение магнитопровода отсутствует."]
+
+    t_min_ms = min(t_values) * 1000.0
+    lines.append(f"Наименьшее время до насыщения по всем режимам и сценариям: {t_min_ms:.2f} мс.")
+    verdict = "success"
+    if t_req_ms > 0:
+        if t_min_ms >= t_req_ms:
+            lines.append(f"Требование выполняется: {t_min_ms:.2f} мс ≥ {t_req_ms:g} мс.")
+        else:
+            verdict = "danger"
+            lines.append(f"Требование НЕ выполняется: {t_min_ms:.2f} мс < {t_req_ms:g} мс.")
+            lines.append("Рекомендация: выбрать ТТ с большей Kном или Sном, либо уменьшить "
+                         "сопротивление вторичной цепи (увеличить сечение кабеля, сократить длину).")
+
+    if use_method == "analytic":
+        need_warning = False
+        if graphic_needed:
+            need_warning = True
+            lines.append("Для сценария с остаточной намагниченностью аналитический метод "
+                         "неприменим (п. 5.1.5) — переключитесь на графический метод.")
+        if t_min_ms < 15.0:
+            need_warning = True
+            lines.append("t_нас < 15 мс — согласно п. 5.1.7 аналитический метод неприменим, "
+                         "переключитесь на графический метод.")
+        if need_warning and verdict != "danger":
+            verdict = "warning"
+    return verdict, lines
+
+
+verdict, verdict_lines = build_verdict(results, t_req, keys, method)
 
 
 # ---------------------------------------------------------------------------
@@ -401,54 +483,62 @@ with tab_calc:
                 if note not in seen:
                     seen.add(note)
                     st.caption(f"• {note}")
+
         # Метод по ВАХ
         if use_vah and vah_data:
             st.markdown("#### Метод по ВАХ (п. 5.3)")
-            vah_rows = []
-            for k in VAH_KEYS:
-                r = res.get(k)
-                if r is None:
-                    continue
-                extra = ""
-                if r.status == ST_OK and r.theta_star is not None:
-                    tag = "θ (вручную)" if r.theta_manual else "θ*"
-                    extra = f"   ({tag} = {math.degrees(r.theta_star):.1f}°)"
-                vah_rows.append({
-                    "Сценарий": "Без остаточной намагниченности" if "without" in k else f"С K_r = {K_R_PRED}",
-                    "Время до насыщения": fmt_t(r) + extra,
-                })
-            st.table(vah_rows)
             
-            # Примечания
-            for k in VAH_KEYS:
-                r = res.get(k)
-                if r is None:
-                    continue
-                for note in r.notes:
-                    if note not in seen:
-                        seen.add(note)
-                        st.caption(f"• {note}")
-            
-            # График ВАХ
-            with st.expander("📈 График ВАХ", expanded=False):
-                vah_plot = build_vah_default(vah_data['u_star'], vah_data['i0_star'], ct_m.r2)
-                df_vah = pd.DataFrame({
-                    "I₀, А": vah_plot['i0'],
-                    "U, В": vah_plot['u'],
-                })
-                try:
-                    import altair as alt
-                    chart_vah = alt.Chart(df_vah).mark_line(strokeWidth=2, color="#d62728").encode(
-                        x=alt.X("I₀, А:Q", title="Ток намагничивания I₀, А"),
-                        y=alt.Y("U, В:Q", title="Напряжение U, В"),
-                        tooltip=["I₀, А:Q", "U, В:Q"],
-                    ).properties(title="Вольт-амперная характеристика ТТ (типовая)", height=300)
-                    st.altair_chart(chart_vah)
-                except Exception as exc:
-                    st.warning(f"График ВАХ недоступен ({type(exc).__name__}).")
-                st.caption(f"Типовая ВАХ построена по точкам U* = {vah_data['u_star']:.1f} В, "
-                          f"I₀* = {vah_data['i0_star']:.3f} А.")
-              
+            # Проверка условия (16)
+            valid_vah, msg_vah = validate_vah_usage(vah_data['u_star'], vah_data['i0_star'], ct_m, kz)
+            if valid_vah:
+                st.success(f"✅ {msg_vah}")
+                vah_rows = []
+                for k in VAH_KEYS:
+                    r = res.get(k)
+                    if r is None:
+                        continue
+                    extra = ""
+                    if r.status == ST_OK and r.theta_star is not None:
+                        tag = "θ (вручную)" if r.theta_manual else "θ*"
+                        extra = f"   ({tag} = {math.degrees(r.theta_star):.1f}°)"
+                    vah_rows.append({
+                        "Сценарий": "Без остаточной намагниченности" if "without" in k else f"С K_r = {K_R_PRED}",
+                        "Время до насыщения": fmt_t(r) + extra,
+                    })
+                st.table(vah_rows)
+                
+                # Примечания
+                for k in VAH_KEYS:
+                    r = res.get(k)
+                    if r is None:
+                        continue
+                    for note in r.notes:
+                        if note not in seen:
+                            seen.add(note)
+                            st.caption(f"• {note}")
+                
+                # График ВАХ
+                with st.expander("📈 График ВАХ", expanded=False):
+                    vah_plot = build_vah_default(vah_data['u_star'], vah_data['i0_star'], ct_m.r2)
+                    df_vah = pd.DataFrame({
+                        "I₀, А": vah_plot['i0'],
+                        "U, В": vah_plot['u'],
+                    })
+                    try:
+                        import altair as alt
+                        chart_vah = alt.Chart(df_vah).mark_line(strokeWidth=2, color="#d62728").encode(
+                            x=alt.X("I₀, А:Q", title="Ток намагничивания I₀, А"),
+                            y=alt.Y("U, В:Q", title="Напряжение U, В"),
+                            tooltip=["I₀, А:Q", "U, В:Q"],
+                        ).properties(title="Вольт-амперная характеристика ТТ (типовая)", height=300)
+                        st.altair_chart(chart_vah)
+                    except Exception as exc:
+                        st.warning(f"График ВАХ недоступен ({type(exc).__name__}).")
+                    st.caption(f"Типовая ВАХ построена по точкам U* = {vah_data['u_star']:.1f} В, "
+                              f"I₀* = {vah_data['i0_star']:.3f} А.")
+            else:
+                st.warning(f"⚠️ {msg_vah}")
+
         if method in ("graphic", "both"):
             g0 = res.get("graphic_without_residual")
             gr = res.get("graphic_with_residual")
@@ -638,6 +728,7 @@ with tab_theory:
         "(в эталонных примерах θ* = 5…36°);\n"
         "- не ограничен диапазоном T_p = 30–300 мс."
     )
+
     st.markdown("### 5. Метод по ВАХ (п. 5.3)")
     st.markdown(
         "Метод по ВАХ позволяет точнее определить параметр режима A, если известна "
@@ -665,6 +756,7 @@ with tab_theory:
         "Если у вас есть фактическая таблица точек ВАХ — введите её в расширенном режиме "
         "(планируется в релизе 1.7)."
     )
+
     st.markdown("### 6. Порядок расчёта по стандарту")
     st.markdown(
         "1. Расчёт выполняется для трёхфазного КЗ, а в сетях с глухозаземлённой нейтралью — "
@@ -686,6 +778,8 @@ with tab_about:
 - графический по паспортным данным (раздел 5.2) — численное воспроизведение универсальных
   характеристик приложения Б по формуле (Г.15) с динамическими графиками и возможностью
   ручного задания начальной фазы θ;
+- метод по ВАХ (п. 5.3) — построение типовой ВАХ по параметрам U* и I₀*, проверка условия (16),
+  расчёт параметра A по формуле (19), использование результата в графическом методе;
 - нагрузка вторичной цепи формируется из параметров всей цепи (п. 4.2.6, Приложение А):
   приборы, соединительный кабель (материал, длина, сечение, схема соединения),
   переходные контакты (0,05 / 0,1 Ом).
@@ -694,8 +788,12 @@ with tab_about:
 - **Релиз 1.6 (23.10.2026):** добавлен метод по ВАХ (п. 5.3 ГОСТ Р 58669-2019) — построение
   типовой ВАХ по параметрам U* и I₀*, проверка условия (16), расчёт параметра A по формуле (19),
   график ВАХ, использование результата в графическом методе.
-- **Релиз 1.5:** нагрузка вторичной цепи из параметров всей цепи (кабель, приборы, контакты).
-- **Релиз 1.4:** графики K_п.р(t) в Word-отчёте; ручное задание начальной фазы θ.
+- **Релиз 1.5 (23.10.2026):** фактическая вторичная нагрузка рассчитывается из параметров
+  всей вторичной цепи — сопротивление приборов, соединительного кабеля (материал жилы,
+  длина, сечение; коэффициент расчётной длины зависит от схемы соединения и вида КЗ)
+  и переходного сопротивления контактов; для трёхфазного и однофазного КЗ нагрузка
+  рассчитывается отдельно; параметры цепи вынесены в таблицу каждого режима в отчёте Word.
+- **Релиз 1.4:** графики K_п.р(t) в Word-отчёте (matplotlib); ручное задание начальной фазы θ.
 - **Релиз 1.3:** графический метод по паспортным данным, динамические графики,
   переключатель метода, расширенная самопроверка.
 - **Релиз 1.2:** модульная структура (`methods/`, `report/`), диагностика структуры файлов.
@@ -703,19 +801,21 @@ with tab_about:
 - **Релиз 1.0:** аналитический метод ГОСТ Р 58669-2019, отчёт в Word.
 
 **Планы развития:**
-- релиз 1.6 — графические методы по ВАХ (п. 5.3) и по характеристике намагничивания (п. 5.4);
-- релиз 1.7 — ГОСТ Р 71879-2024: классы 5PR/10PR/TPY/TPZ, циклы АПВ (второе КЗ);
-- релиз 1.8 — выбор ТТ по ГОСТ Р 71403-2024;
-- релиз 1.9 — справочные данные ГОСТ Р 70507.2-2024;
-- релиз 2.0 — проверка эксплуатируемых ТТ по РД 153-34.0-35.301-2002 и ГОСТ 7746-2015;
-- релиз 2.1 — чек-лист требований ПУЭ.
+- релиз 1.7 — графический метод по характеристике намагничивания (п. 5.4);
+- релиз 1.8 — ГОСТ Р 71879-2024: классы 5PR/10PR/TPY/TPZ, циклы АПВ (второе КЗ);
+- релиз 1.9 — выбор ТТ по ГОСТ Р 71403-2024;
+- релиз 2.0 — справочные данные ГОСТ Р 70507.2-2024;
+- релиз 2.1 — проверка эксплуатируемых ТТ по РД 153-34.0-35.301-2002 и ГОСТ 7746-2015;
+- релиз 2.2 — чек-лист требований ПУЭ;
+- релиз 2.3 — ввод фактической таблицы ВАХ (загрузка из файла или ручной ввод).
 
 **Ограничения текущего релиза:**
 - ТТ классов точности P / PX / TPX с замкнутым магнитопроводом;
 - одноэкспоненциальная апериодическая составляющая (T_р.экв); расчёт по сумме воздействий
   отдельных ветвей (п. 5.2.3, формула 15) будет добавлен позднее;
 - для кабеля учитывается только активное сопротивление (индуктивное ~0,07 Ом/км на типовых
-  длинах пренебрежимо мало); сопротивления приведены к 20 °С (п. 4.2.1).
+  длинах пренебрежимо мало); сопротивления приведены к 20 °С (п. 4.2.1);
+- метод по ВАХ использует типовую характеристику; для точного расчёта требуется фактическая ВАХ.
 """)
 
 # === КОНЕЦ ФАЙЛА app.py ===
