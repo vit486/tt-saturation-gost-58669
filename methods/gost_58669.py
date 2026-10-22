@@ -8,14 +8,8 @@
 
        t_нас = T_p · ln( ω·T_p / ( ω·T_p + 1 - A·(1 - K_r) ) )
 
-   Контрольный пример стандарта (Приложение В, п. В.1.1.8):
-       t(3) = 0,128·ln( 314·0,128 / (314·0,128 - 5,785 + 1) ) = 16,22 мс
-
 2) ГРАФИЧЕСКИЙ ПО ПАСПОРТНЫМ ДАННЫМ (раздел 5.2, приложение Б) в численной
-   форме. Универсальные характеристики приложения Б построены по формуле (Г.15)
-   для начальных фаз θ, при которых время до насыщения наименьшее (п. Г.3.7).
-   Приложение Б воспроизводится численно: решается уравнение
-   K_п.р(t) = A·(1 - K_r) с минимизацией по θ.
+   форме по формуле (Г.15):
 
        K_п.р(t) = sin α · cos θ · e^(-t/T_p)
                 + cos α · cos θ · ω·T_p · (1 - e^(-t/T_p))
@@ -23,9 +17,9 @@
 
        cos α = (R2 + Rн.факт) / z2Σ                                      (12)
 
-   Достоверность реализации подтверждена (см. methods/reference_examples.py):
-   вырождением (Г.15) в (Г.17)/(Г.18), свойствами K(0)=0 и K(θ+π)=-K(θ),
-   независимым интегрированием потокосцепления по уравнению (Г.13).
+   По умолчанию время до насыщения ищется минимизацией по начальной фазе θ
+   (п. Г.3.7). Поддерживается и фиксированная θ, заданная пользователем
+   (параметр theta_override).
 """
 from __future__ import annotations
 
@@ -115,6 +109,7 @@ class SaturationResult:
     method: str = "analytic"
     theta_star: Optional[float] = None
     cos_alpha: float = 1.0
+    theta_manual: bool = False
 
 
 def calc_a_param(ct: CTParams, kz: KZParams) -> float:
@@ -172,10 +167,13 @@ def k_pr(t, t_p: float, alpha: float, theta: float):
 
 
 def t_nas_graphic(a: float, t_p: float, alpha: float, k_r: float = 0.0,
-                  n_theta: int = 361, n_t: int = 4000) -> Tuple[Optional[float], Optional[float], str]:
-    """Численное воспроизведение универсальных характеристик приложения Б:
-    минимум по θ первого пересечения K_п.р(t) = A·(1-K_r).
-    Возвращает (t_нас [с], θ* [рад], статус)."""
+                  n_theta: int = 361, n_t: int = 4000,
+                  theta_fixed: Optional[float] = None) -> Tuple[Optional[float], Optional[float], str]:
+    """Численное воспроизведение универсальных характеристик приложения Б.
+
+    Если theta_fixed = None — минимум по θ первого пересечения K_п.р(t) = A·(1-K_r)
+    (п. Г.3.7). Если theta_fixed задан — время до насыщения для этой конкретной θ.
+    Возвращает (t_нас [с], θ [рад], статус)."""
     if np is None:
         raise RuntimeError("Для графического метода требуется numpy.")
     eff = a * (1.0 - k_r)
@@ -185,31 +183,30 @@ def t_nas_graphic(a: float, t_p: float, alpha: float, k_r: float = 0.0,
     t_max = max(0.25, 6.0 * t_p)
     n_t = int(min(12000, max(n_t, t_max / 0.0002)))
     t = np.linspace(0.0, t_max, n_t)
-    th = np.linspace(-np.pi / 2.0, np.pi / 2.0, n_theta)
-    e = np.exp(-t / t_p)
 
-    K = (math.sin(alpha) * np.cos(th)[:, None] * e[None, :]
-         + math.cos(alpha) * np.cos(th)[:, None] * OMEGA * t_p * (1.0 - e)[None, :]
-         - np.sin(OMEGA * t[None, :] + alpha + th[:, None])
-         + math.cos(alpha) * np.sin(th)[:, None])
+    if theta_fixed is not None:
+        thetas = [float(theta_fixed)]
+    else:
+        thetas = np.linspace(-np.pi / 2.0, np.pi / 2.0, n_theta)
 
     best_t: Optional[float] = None
     best_th: Optional[float] = None
-    for i in range(n_theta):
-        hit = np.nonzero(K[i] >= eff)[0]
+    for th in thetas:
+        k_arr = k_pr(t, t_p, alpha, float(th))
+        hit = np.nonzero(k_arr >= eff)[0]
         if hit.size == 0 or hit[0] == 0:
             continue
         j = int(hit[0])
         lo, hi = float(t[j - 1]), float(t[j])
         for _ in range(45):
             mid = 0.5 * (lo + hi)
-            if float(k_pr(mid, t_p, alpha, float(th[i]))) >= eff:
+            if float(k_pr(mid, t_p, alpha, float(th))) >= eff:
                 hi = mid
             else:
                 lo = mid
         tc = 0.5 * (lo + hi)
         if best_t is None or tc < best_t:
-            best_t, best_th = tc, float(th[i])
+            best_t, best_th = tc, float(th)
 
     if best_t is None:
         return None, None, ST_NO_SAT
@@ -222,9 +219,10 @@ def build_kpr_curve(t_p: float, alpha: float, theta: float, t_end_ms: float, n: 
     return t * 1000.0, np.asarray(k_pr(t, t_p, alpha, theta), dtype=float)
 
 
-def _graphic(ct, kz, k_r, a) -> SaturationResult:
+def _graphic(ct, kz, k_r, a, theta_override=None) -> SaturationResult:
     notes: List[str] = []
-    t, th, why = t_nas_graphic(a, kz.t_p, ct.alpha, k_r)
+    manual = theta_override is not None
+    t, th, why = t_nas_graphic(a, kz.t_p, ct.alpha, k_r, theta_fixed=theta_override)
 
     if k_r == 0.0 and a <= 1.0:
         notes.append("A ≤ 1 — действующий ток КЗ превышает ток предельной кратности ТТ: "
@@ -232,18 +230,22 @@ def _graphic(ct, kz, k_r, a) -> SaturationResult:
                      "Эксплуатация недопустима (условие (5) ГОСТ).")
         if t is not None:
             notes.append(f"Расчётное время первого насыщения при этом {t * 1000:.2f} мс (справочно).")
-        return SaturationResult(a, k_r, ST_STEADY, 0.0, notes, "graphic", th, ct.cos_alpha)
+        return SaturationResult(a, k_r, ST_STEADY, 0.0, notes, "graphic", th, ct.cos_alpha, manual)
 
     if why == ST_NO_SAT or t is None:
         notes.append("Уравнение K_п.р(t) = A·(1−K_r) не имеет решения: максимальное значение "
                      "коэффициента переходного режима ниже уровня насыщения — насыщение "
                      "магнитопровода в переходном процессе отсутствует.")
-        return SaturationResult(a, k_r, ST_NO_SAT, None, notes, "graphic", None, ct.cos_alpha)
+        return SaturationResult(a, k_r, ST_NO_SAT, None, notes, "graphic", None, ct.cos_alpha, manual)
 
-    notes.append(f"Наименьшее время до насыщения соответствует начальной фазе "
-                 f"θ* = {math.degrees(th):.1f}° (п. Г.3.7: универсальные характеристики "
-                 "построены для θ, при которых t_нас наименьшее).")
-    return SaturationResult(a, k_r, ST_OK, t, notes, "graphic", th, ct.cos_alpha)
+    if manual:
+        notes.append(f"Время до насыщения рассчитано при заданной вручную начальной фазе "
+                     f"θ = {math.degrees(th):.1f}°.")
+    else:
+        notes.append(f"Наименьшее время до насыщения соответствует начальной фазе "
+                     f"θ* = {math.degrees(th):.1f}° (п. Г.3.7: универсальные характеристики "
+                     "построены для θ, при которых t_нас наименьшее).")
+    return SaturationResult(a, k_r, ST_OK, t, notes, "graphic", th, ct.cos_alpha, manual)
 
 
 ANALYTIC_KEYS = ("without_residual", "with_residual")
@@ -251,17 +253,19 @@ GRAPHIC_KEYS = ("graphic_without_residual", "graphic_with_residual")
 ALL_KEYS = ANALYTIC_KEYS + GRAPHIC_KEYS
 
 
-def calculate(ct: CTParams, kz: KZParams, method: str = "analytic") -> dict:
+def calculate(ct: CTParams, kz: KZParams, method: str = "analytic",
+              theta_override: Optional[float] = None) -> dict:
     """Расчёт для обоих вариантов остаточной намагниченности (п. 4.3 ГОСТ).
-    method: "analytic" | "graphic" | "both"."""
+    method: "analytic" | "graphic" | "both".
+    theta_override: начальная фаза θ [рад] для графического метода (None — авто)."""
     a = calc_a_param(ct, kz)
     out = {
         "without_residual": _analytic(ct, kz, 0.0, a),
         "with_residual": _analytic(ct, kz, K_R_PRED, a),
     }
     if method in ("graphic", "both"):
-        out["graphic_without_residual"] = _graphic(ct, kz, 0.0, a)
-        out["graphic_with_residual"] = _graphic(ct, kz, K_R_PRED, a)
+        out["graphic_without_residual"] = _graphic(ct, kz, 0.0, a, theta_override)
+        out["graphic_with_residual"] = _graphic(ct, kz, K_R_PRED, a, theta_override)
     return out
 
 
