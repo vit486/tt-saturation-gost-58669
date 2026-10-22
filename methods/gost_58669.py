@@ -297,41 +297,43 @@ def build_bn_default(b_sat=1.8, h_knee=100, n_points=100):
 
 def calc_b_from_bn(h_value, bn_data):
     """Интерполяция B по H из характеристики намагничивания."""
-    h_arr = np.array(bn_data['h'])
-    b_arr = np.array(bn_data['b'])
+    h_arr = np.array(bn_data['h'], dtype=float)
+    b_arr = np.array(bn_data['b'], dtype=float)
 
     if h_value <= h_arr[0]:
         return float(b_arr[0])
     if h_value >= h_arr[-1]:
         return float(b_arr[-1])
 
-    idx = np.searchsorted(h_arr, h_value)
-    h0, h1 = h_arr[idx - 1], h_arr[idx]
-    b0, b1 = b_arr[idx - 1], b_arr[idx]
+    idx = int(np.searchsorted(h_arr, h_value))
+    h0, h1 = float(h_arr[idx - 1]), float(h_arr[idx])
+    b0, b1 = float(b_arr[idx - 1]), float(b_arr[idx])
 
+    if h1 == h0:
+        return b0
     return float(b0 + (b1 - b0) * (h_value - h0) / (h1 - h0))
 
 
 def calc_a_from_bn(ct, kz, bn_data, w2, s, l):
     """Параметр режима A по формуле (23) ГОСТ Р 58669-2019: A = Bт / Bт(Hг).
 
-    - Bт = U2sin / (222 · w2 · s)  — формула (24)
+    - Bт = U2sin / (222 · w2 · s)  — формула (24); s в м²
     - Hг = I0ε · w2 / l             — формула (22)
     - Bт(Hг)                        — из характеристики намагничивания
     """
+    w2 = float(w2)
+    s = float(s)
+    l = float(l)
+    if w2 <= 0 or s <= 0 or l <= 0:
+        raise ValueError("Параметры w2, s, l должны быть положительными.")
+
     k_fact = kz.i_kz / ct.i1_nom
     u2sin = ct.i2_nom * k_fact * ct.z2_sigma
 
-    # Bт по формуле (24); s — в м²
     b_t = u2sin / (222.0 * w2 * s)
-
-    # I0ε по формуле (17)
     i0_eps = 0.1 * ct.i2_nom * k_fact
+    h_g = i0_eps * w2 / l
 
-    # Hг по формуле (22)
-    h_g = i0_eps * w2 / l if l > 0 else 0.0
-
-    # Bт(Hг) из характеристики
     b_t_hg = calc_b_from_bn(h_g, bn_data)
 
     if b_t_hg <= 0:
@@ -342,6 +344,12 @@ def calc_a_from_bn(ct, kz, bn_data, w2, s, l):
 
 def validate_bn_usage(ct, kz, bn_data, w2, s, l):
     """Проверка условия (21) ГОСТ Р 58669-2019: Bт > 1.8 Тл."""
+    w2 = float(w2)
+    s = float(s)
+    l = float(l)
+    if w2 <= 0 or s <= 0 or l <= 0:
+        return False, "Параметры w2, s, l должны быть положительными."
+
     k_fact = kz.i_kz / ct.i1_nom
     u2sin = ct.i2_nom * k_fact * ct.z2_sigma
     b_t = u2sin / (222.0 * w2 * s)
