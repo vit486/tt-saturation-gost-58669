@@ -74,7 +74,7 @@ def _keys_for(method: str):
     return ANALYTIC_KEYS
 
 
-def _make_chart_png(kz, ct, gres, eff) -> io.BytesIO:
+def _make_chart_png(kz, ct_m, gres, eff) -> io.BytesIO:
     """Рендер графика K_п.р(t) в PNG для вставки в Word."""
     if not _HAS_MPL:
         raise RuntimeError("matplotlib не установлен")
@@ -88,8 +88,8 @@ def _make_chart_png(kz, ct, gres, eff) -> io.BytesIO:
         t_end = min(max(kz.t_p * 3000.0, 40.0), 400.0)
 
     theta = gres.theta_star if gres.theta_star is not None else 0.0
-    t_ms, k_star = build_kpr_curve(kz.t_p, ct.alpha, theta, t_end)
-    _, k_zero = build_kpr_curve(kz.t_p, ct.alpha, 0.0, t_end)
+    t_ms, k_star = build_kpr_curve(kz.t_p, ct_m.alpha, theta, t_end)
+    _, k_zero = build_kpr_curve(kz.t_p, ct_m.alpha, 0.0, t_end)
 
     lbl_star = (f"θ = {math.degrees(theta):.1f}° (задано вручную)" if gres.theta_manual
                 else "θ = θ* (расчётный минимум, п. Г.3.7)")
@@ -105,7 +105,7 @@ def _make_chart_png(kz, ct, gres, eff) -> io.BytesIO:
                 label=f"t_нас = {t_nas_ms:.2f} мс")
     ax.set_xlabel("Время t, мс")
     ax.set_ylabel("Коэффициент переходного режима K_п.р(t)")
-    ax.set_title(f"{kz.label} · T_p = {kz.t_p * 1000:.0f} мс · cos α = {ct.cos_alpha:.3f}",
+    ax.set_title(f"{kz.label} · T_p = {kz.t_p * 1000:.0f} мс · cos α = {ct_m.cos_alpha:.3f}",
                  fontsize=10)
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8, loc="best")
@@ -118,8 +118,9 @@ def _make_chart_png(kz, ct, gres, eff) -> io.BytesIO:
     return buf
 
 
-def build_report(ct, results, verdict_lines, verdict, t_req_ms, method="analytic") -> bytes:
-    """results — список кортежей (KZParams, dict результатов calculate())."""
+def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="analytic") -> bytes:
+    """ct — паспортные данные ТТ; chain — параметры вторичной цепи;
+    results — список кортежей (CTParams режима, KZParams, dict результатов)."""
     doc = Document()
     doc.add_heading("Отчёт о проверке трансформатора тока", 0)
 
@@ -130,7 +131,8 @@ def build_report(ct, results, verdict_lines, verdict, t_req_ms, method="analytic
         "Определение времени до насыщения при коротких замыканиях по ГОСТ Р 58669-2019, "
         f"{METHOD_TITLES.get(method, method)}. Расчёт выполнен без остаточной "
         f"намагниченности и с предельной остаточной намагниченностью K_r = {K_R_PRED} "
-        "(п. 4.3, п. 5.1.3)."
+        "(п. 4.3, п. 5.1.3). Фактическая вторичная нагрузка определена по параметрам "
+        "вторичной цепи в соответствии с п. 4.2.6 и Приложением А."
     )
     if method in ("graphic", "both"):
         doc.add_paragraph(
@@ -149,27 +151,36 @@ def build_report(ct, results, verdict_lines, verdict, t_req_ms, method="analytic
         ("Коэффициент мощности нагрузки cos φном", f"{ct.cos_phi_nom:g}"),
         ("Активное сопротивление вторичной обмотки R2", f"{ct.r2:g} Ом"),
         ("Индуктивное сопротивление вторичной обмотки X2", f"{ct.x2:g} Ом"),
-        ("Фактическое активное сопротивление нагрузки Rн.факт", f"{ct.r_load_fact:g} Ом"),
-        ("Фактическое индуктивное сопротивление нагрузки Xн.факт", f"{ct.x_load_fact:g} Ом"),
+        ("Сопротивление приборов Rприб", f"{chain['r_prib']:g} Ом"),
+        ("Индуктивная составляющая нагрузки Xн", f"{chain['x_load']:g} Ом"),
+        ("Схема соединения вторичных обмоток", chain["scheme"]),
+        ("Материал жилы кабеля", chain["material"]),
+        ("Длина кабеля (в одну сторону)", f"{chain['length']:g} м"),
+        ("Сечение жилы", f"{chain['section']:g} мм²"),
+        ("Переходное сопротивление контактов", f"{chain['r_per']:g} Ом"),
         ("Требуемое время до насыщения", f"{t_req_ms:g} мс" if t_req_ms else "не задано"),
     ])
 
-    doc.add_heading("2. Промежуточные величины", level=1)
+    doc.add_heading("2. Промежуточные величины (общие)", level=1)
     _add_table(doc, ["Величина", "Значение"], [
         ("Сопротивление номинальной нагрузки zн.ном = Sном / I2ном²", f"{ct.z_n_nom:.4f} Ом"),
         ("Номинальное полное сопротивление z2Σном (формула 10)", f"{ct.z2_sigma_nom:.4f} Ом"),
-        ("Полное сопротивление ветви вторичного тока z2Σ (формула 11)", f"{ct.z2_sigma:.4f} Ом"),
-        ("Угол сопротивления ветви вторичного тока α (формула 12)",
-         f"{math.degrees(ct.alpha):.2f}° (cos α = {ct.cos_alpha:.4f})"),
+        ("Коэффициент расчётной длины кабеля — трёхфазное КЗ", f"{chain['k_sch_3']:g}"),
+        ("Коэффициент расчётной длины кабеля — однофазное КЗ", f"{chain['k_sch_1']:g}"),
     ])
 
     keys = _keys_for(method)
-    for idx, (kz, res) in enumerate(results, start=3):
+    for idx, (ct_m, kz, res) in enumerate(results, start=3):
+        r_cable = ct_m.r_load_fact - chain["r_prib"] - chain["r_per"]
         doc.add_heading(f"{idx}. Режим: {kz.label}", level=1)
         _add_table(doc, ["Параметр", "Значение"], [
             ("Ток КЗ (действующее значение)", f"{kz.i_kz:g} А"),
             ("Постоянная времени T_p", f"{kz.t_p:g} с ({kz.t_p * 1000:.0f} мс)"),
-            ("Фактическая кратность Kфакт = Iкз / I1ном", f"{kz.i_kz / ct.i1_nom:.2f}"),
+            ("Фактическая кратность Kфакт = Iкз / I1ном", f"{kz.i_kz / ct_m.i1_nom:.2f}"),
+            ("R кабеля для этого режима (ρ·k·L/S)", f"{r_cable:.4f} Ом"),
+            ("Rн.факт = Rприб + Rпер + Rкаб", f"{ct_m.r_load_fact:.4f} Ом"),
+            ("z2Σ (формула 11)", f"{ct_m.z2_sigma:.4f} Ом"),
+            ("Угол α (формула 12)", f"{math.degrees(ct_m.alpha):.2f}° (cos α = {ct_m.cos_alpha:.4f})"),
             ("Параметр режима A (формула 9)", f"{res[keys[0]].a:.4f}"),
         ])
 
@@ -207,7 +218,7 @@ def build_report(ct, results, verdict_lines, verdict, t_req_ms, method="analytic
                 cap = doc.add_paragraph()
                 cap.add_run(f"График K_п.р(t) — {SCENARIO_TITLES[key]}:").bold = True
                 try:
-                    png = _make_chart_png(kz, ct, r, eff)
+                    png = _make_chart_png(kz, ct_m, r, eff)
                     doc.add_picture(png, width=Inches(6.0))
                 except Exception as exc:
                     doc.add_paragraph(f"(График не построен: {type(exc).__name__}. "
