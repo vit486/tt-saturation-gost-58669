@@ -1,6 +1,6 @@
 """
 ⚡ Проверка трансформаторов тока на насыщение при коротких замыканиях.
-Методика: ГОСТ Р 58669-2019.  Релиз 1.8.
+Методика: ГОСТ Р 58669-2019.  Релиз 1.9.
 """
 
 import math
@@ -38,7 +38,7 @@ st.set_page_config(page_title="Проверка ТТ — ГОСТ Р 58669-2019"
 
 st.title("⚡ Проверка трансформаторов тока")
 st.caption("Насыщение при КЗ · ГОСТ Р 58669-2019 · аналитический и графический методы "
-           "· релиз 1.8")
+           "· релиз 1.9")
 
 METHOD_OPTIONS = {
     "Аналитический (п. 5.1)": "analytic",
@@ -46,16 +46,6 @@ METHOD_OPTIONS = {
     "Оба метода — сравнение": "both",
 }
 METHOD_KEYS = {"analytic": ANALYTIC_KEYS, "graphic": GRAPHIC_KEYS, "both": GRAPHIC_KEYS}
-SCENARIO_TITLE = {
-    "without_residual": "Аналитический · без остаточной намагниченности (K_r = 0)",
-    "with_residual": f"Аналитический · с остаточной намагниченностью (K_r = {K_R_PRED})",
-    "graphic_without_residual": "Графический · без остаточной намагниченности (K_r = 0)",
-    "graphic_with_residual": f"Графический · с остаточной намагниченностью (K_r = {K_R_PRED})",
-    "vah_without_residual": "По ВАХ · без остаточной намагниченности (K_r = 0)",
-    "vah_with_residual": f"По ВАХ · с остаточной намагниченностью (K_r = {K_R_PRED})",
-    "bn_without_residual": "По B(H) · без остаточной намагниченности (K_r = 0)",
-    "bn_with_residual": f"По B(H) · с остаточной намагниченностью (K_r = {K_R_PRED})",
-}
 LBL_STAR_AUTO = "θ = θ* — расчётный минимум (п. Г.3.7)"
 LBL_ZERO = "θ = 0° — максимум апериодической составляющей"
 
@@ -77,6 +67,24 @@ PRESETS = {
         r2=0.45, x2=0.0, r_prib=0.8, x_load=0.0),
 }
 
+
+def make_scenario_title(key, k_r):
+    """Название сценария с актуальным значением K_r."""
+    prefix = {
+        "without_residual": "Аналитический",
+        "with_residual": "Аналитический",
+        "graphic_without_residual": "Графический",
+        "graphic_with_residual": "Графический",
+        "vah_without_residual": "По ВАХ",
+        "vah_with_residual": "По ВАХ",
+        "bn_without_residual": "По B(H)",
+        "bn_with_residual": "По B(H)",
+    }.get(key, key)
+    suffix = ("без остаточной намагниченности (K_r = 0)" if "without" in key
+              else f"с остаточной намагниченностью (K_r = {k_r:g})")
+    return f"{prefix} · {suffix}"
+
+
 with st.sidebar:
     st.header("⚙️ Исходные данные")
 
@@ -93,6 +101,19 @@ with st.sidebar:
         theta_deg = st.number_input("θ, градусы", min_value=-90.0, max_value=90.0,
                                     value=0.0, step=1.0)
         theta_override = math.radians(theta_deg)
+
+    st.subheader("Остаточная намагниченность")
+    custom_kr = st.checkbox(
+        "Задать K_r вручную", value=False,
+        help="По умолчанию K_r = 0,86 (класс P, п. 5.1.3 ГОСТ Р 58669-2019). Для классов "
+             "5PR/10PR или по заводским данным K_r может быть ниже, например 0,1 "
+             "(ГОСТ Р 70507.2-2024, таблица 5; ГОСТ Р 71879-2024).")
+    if custom_kr:
+        k_r_value = st.number_input(
+            "K_r — коэффициент остаточной намагниченности", min_value=0.0, max_value=1.0,
+            value=0.86, step=0.01, format="%.2f")
+    else:
+        k_r_value = K_R_PRED
 
     preset_name = st.selectbox("Тип ТТ", list(PRESETS.keys()))
     preset = PRESETS[preset_name]
@@ -207,23 +228,25 @@ kz3 = KZParams(i_kz3, tp3, "трёхфазное КЗ")
 
 try:
     with st.spinner("Расчёт времени до насыщения…"):
-        results = [(ct3, kz3, calculate(ct3, kz3, method, theta_override))]
+        results = [(ct3, kz3, calculate(ct3, kz3, method, theta_override, k_r_value))]
         if use_vah and vah_data:
             results[0][2].update(calculate_vah(ct3, kz3, vah_data['u_star'],
-                                               vah_data['i0_star'], theta_override))
+                                               vah_data['i0_star'], theta_override, k_r_value))
         if use_bn and bn_data and bn_params:
             results[0][2].update(calculate_bn(ct3, kz3, bn_data, bn_params['w2'],
-                                              bn_params['s'], bn_params['l'], theta_override))
+                                              bn_params['s'], bn_params['l'],
+                                              theta_override, k_r_value))
         if use_kz1:
             ct1 = CTParams(i1_nom, i2_nom, k_nom, s_nom, cos_phi, r2, x2, r_n1, x_load)
             kz1 = KZParams(i_kz1, tp1, "однофазное КЗ")
-            res1 = calculate(ct1, kz1, method, theta_override)
+            res1 = calculate(ct1, kz1, method, theta_override, k_r_value)
             if use_vah and vah_data:
                 res1.update(calculate_vah(ct1, kz1, vah_data['u_star'],
-                                          vah_data['i0_star'], theta_override))
+                                          vah_data['i0_star'], theta_override, k_r_value))
             if use_bn and bn_data and bn_params:
                 res1.update(calculate_bn(ct1, kz1, bn_data, bn_params['w2'],
-                                         bn_params['s'], bn_params['l'], theta_override))
+                                         bn_params['s'], bn_params['l'],
+                                         theta_override, k_r_value))
             results.append((ct1, kz1, res1))
 except ValueError as e:
     st.error(f"Ошибка исходных данных: {e}")
@@ -300,7 +323,6 @@ verdict, verdict_lines = build_verdict(results, t_req, keys, method)
 
 
 def curve_frames(t_p, alpha, theta_star, eff, t_nas_ms, t_end_ms, star_label, n=1200):
-    """Кадры для Altair и запасной кадр для st.line_chart."""
     t_ms, k_star = build_kpr_curve(t_p, alpha, theta_star if theta_star is not None else 0.0,
                                    t_end_ms, n)
     _, k_zero = build_kpr_curve(t_p, alpha, 0.0, t_end_ms, n)
@@ -322,7 +344,6 @@ def curve_frames(t_p, alpha, theta_star, eff, t_nas_ms, t_end_ms, star_label, n=
 
 
 def render_kpr_chart(ct_m, kz, gres, eff):
-    """Динамический график коэффициента переходного режима."""
     if gres.status == ST_OK and gres.t_nas is not None:
         t_nas_ms = gres.t_nas * 1000.0
         t_end = min(max(t_nas_ms * 1.45, 20.0), 400.0)
@@ -402,8 +423,7 @@ def render_bn_chart(bn_data):
                f"Hколено = {bn_data['h_knee']:.0f} А/м.")
 
 
-def render_method_table(res, method_keys):
-    """Таблица результатов для заданного набора методов."""
+def render_method_table(res, method_keys, k_r):
     rows = []
     for k in method_keys:
         r = res.get(k)
@@ -413,8 +433,7 @@ def render_method_table(res, method_keys):
         if r.status == ST_OK and r.theta_star is not None:
             tag = "θ (вручную)" if r.theta_manual else "θ*"
             extra = f"   ({tag} = {math.degrees(r.theta_star):.1f}°)"
-        rows.append({"Сценарий": "Без остаточной намагниченности" if "without" in k
-                     else f"С K_r = {K_R_PRED}",
+        rows.append({"Сценарий": make_scenario_title(k, k_r),
                      "Время до насыщения": fmt_t(r) + extra})
     return rows
 
@@ -440,10 +459,11 @@ tab_calc, tab_check, tab_theory, tab_about = st.tabs([
 with tab_calc:
     banner = {"success": st.success, "warning": st.warning, "danger": st.error}[verdict]
     banner(" ".join(verdict_lines))
-    mode_note = (f"Метод: **{method_label}**." if not manual_theta
-                 else f"Метод: **{method_label}**, θ задана вручную = {theta_deg:.1f}°.")
-    st.caption(mode_note + f" Итог — по сценариям выбранного метода "
-               f"(без остаточной намагниченности и с K_r = {K_R_PRED}).")
+    kr_note = f"K_r = {k_r_value:g}" + (" (задано вручную)" if custom_kr else " (по умолчанию)")
+    mode_note = (f"Метод: **{method_label}**, {kr_note}." if not manual_theta
+                 else f"Метод: **{method_label}**, {kr_note}, θ задана вручную = {theta_deg:.1f}°.")
+    st.caption(mode_note + " Итог — по сценариям выбранного метода "
+               "(без остаточной намагниченности и с остаточной).")
 
     for ct_m, kz, res in results:
         st.subheader(f"Режим: {kz.label}")
@@ -454,7 +474,7 @@ with tab_calc:
         c3.metric("Rн.факт (с кабелем)", f"{ct_m.r_load_fact:.3f} Ом")
         c4.metric("Параметр A", f"{a_val:.3f}")
 
-        st.table(render_method_table(res, ANALYTIC_KEYS + GRAPHIC_KEYS))
+        st.table(render_method_table(res, ANALYTIC_KEYS + GRAPHIC_KEYS, k_r_value))
 
         seen = set()
         show_notes(res, ANALYTIC_KEYS + GRAPHIC_KEYS, seen)
@@ -468,12 +488,12 @@ with tab_calc:
                     render_kpr_chart(ct_m, kz, g0, a_val)
             if gr is not None:
                 with st.expander(f"📈 График K_п.р(t) — с остаточной намагниченностью "
-                                 f"K_r = {K_R_PRED}"):
-                    render_kpr_chart(ct_m, kz, gr, a_val * (1.0 - K_R_PRED))
+                                 f"K_r = {k_r_value:g}"):
+                    render_kpr_chart(ct_m, kz, gr, a_val * (1.0 - k_r_value))
 
         if use_vah and vah_data and VAH_KEYS[0] in res:
             st.markdown("#### Метод по ВАХ (п. 5.3)")
-            st.table(render_method_table(res, VAH_KEYS))
+            st.table(render_method_table(res, VAH_KEYS, k_r_value))
             show_notes(res, VAH_KEYS, seen)
             with st.expander("📈 График ВАХ", expanded=False):
                 render_vah_chart(vah_data, ct_m.r2)
@@ -482,9 +502,9 @@ with tab_calc:
             st.markdown("#### Метод по характеристике намагничивания (п. 5.4)")
             b_t = calc_b_t(ct_m, kz, bn_params['w2'], bn_params['s'])
             st.caption(f"Расчётная амплитуда магнитной индукции **Bт = {b_t:.3f} Тл** "
-                       f"(порог {1.8} Тл). Изменяя w2, s, l, Bнас, Hколено, вы влияете на "
+                       f"(порог 1,8 Тл). Изменяя w2, s, l, Bнас, Hколено, вы влияете на "
                        "результат метода.")
-            st.table(render_method_table(res, BN_KEYS))
+            st.table(render_method_table(res, BN_KEYS, k_r_value))
             show_notes(res, BN_KEYS, seen)
             with st.expander("📈 Характеристика намагничивания B(H)", expanded=False):
                 render_bn_chart(bn_data)
@@ -499,7 +519,7 @@ with tab_calc:
                 tg = rg.t_nas * 1000.0 if (rg.status == ST_OK and rg.t_nas) else None
                 dev = f"{(ta - tg) / tg * 100.0:+.1f}%" if (ta and tg) else "—"
                 sc = ("без остаточной намагниченности" if k_a == "without_residual"
-                      else f"K_r = {K_R_PRED}")
+                      else f"K_r = {k_r_value:g}")
                 cmp_rows.append({
                     "Режим": kz.label, "Сценарий": sc,
                     "Аналитический": f"{ta:.2f} мс" if ta is not None else fmt_t(ra),
@@ -531,7 +551,8 @@ with tab_calc:
 
     st.divider()
     report_bytes = build_report(ct3, chain, results, verdict_lines, verdict, t_req, method,
-                                vah_data=vah_data, bn_data=bn_data, bn_params=bn_params)
+                                vah_data=vah_data, bn_data=bn_data, bn_params=bn_params,
+                                k_r=k_r_value)
     st.download_button("📄 Скачать отчёт (.docx)", data=report_bytes,
                        file_name=f"Otchet_TT_GOST_58669_{datetime.now():%Y%m%d_%H%M}.docx",
                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
@@ -585,7 +606,9 @@ with tab_theory:
     st.markdown("Все методы решают уравнение переходного процесса (п. Г.6.2):\n\n"
                 "`A·(1 − K_r) = K_п.р(t_нас)`,\n\n"
                 "где **A** — параметр режима, **K_п.р(t)** — коэффициент переходного режима, "
-                f"**K_r** — коэффициент остаточной намагниченности (для класса P — {K_R_PRED}).")
+                "**K_r** — коэффициент остаточной намагниченности. По умолчанию "
+                f"K_r = {K_R_PRED} (класс P, п. 5.1.3); для классов 5PR/10PR или по заводским "
+                "данным его можно задать вручную в панели слева (например 0,1).")
 
     st.markdown("### 1. Нагрузка вторичной цепи (п. 4.2.6, Приложение А)")
     st.code("Rн.факт = Rприб + Rпер + Rкаб;   Rкаб = ρ · kсх · L / S", language="text")
@@ -610,7 +633,7 @@ with tab_theory:
     st.code("t_нас = T_p · ln( ω·T_p / ( ω·T_p + 1 − A·(1 − K_r) ) )          (3), (6)",
             language="text")
     st.warning("«+1» присутствует **только в знаменателе**; в числителе — только ω·T_p.")
-    st.markdown("**Проверяемые условия** (колонка справа — что происходит при нарушении):")
+    st.markdown("**Проверяемые условия** (справа — что происходит при нарушении):")
     st.markdown("""
 | Условие | Если выполняется | Если НЕ выполняется |
 |---|---|---|
@@ -635,7 +658,9 @@ with tab_theory:
     st.markdown("### 6. Метод по характеристике намагничивания (п. 5.4)")
     st.code("A = Bт / Bт(Hг);   Bт = U2sin / (222·w2·s);   Hг = I₀ε·w2 / l     (22)–(24)",
             language="text")
-    st.markdown("Условие применимости (21): `Bт > 1,8 Тл`; иначе магнитопровод не насыщается.")
+    st.markdown("Условие применимости (21): `Bт > 1,8 Тл`; иначе магнитопровод не насыщается.\n"
+                "Типовая кривая B(H) — монотонная: линейный рост до точки излома, затем плавное "
+                "насыщение. Для точного расчёта используйте фактическую характеристику конкретного ТТ.")
 
     st.markdown("### 7. Разобранный пример (В.1.1, ТТ SAS 550/5G 2000/1)")
     st.markdown("""
@@ -648,7 +673,7 @@ R2 = 7.51 Ом, X2 = 0, Rн.факт = 6.3 Ом, Iкз = 23145 А, T_p = 128 м�
 - z2Σ = √((7.51 + 6.3)² + 0²) = 13.81 Ом
 - A = 2000·20·46.23 / (23145·13.81) = 5.785
 - ω·T_p = 314.16·0.128 = 40.21
-- t_нас = 0.128·ln(40.21 / (40.21 − 5.785 + 1)) = 0.128·ln(40.21/35.43) = **16.22 мс**
+- t_нас = 0.128·ln(40.21 / (40.21 − 5.785 + 1)) = **16.22 мс**
 
 Эталон (Приложение В, В.1.1.8): A = 5.785, t_нас = 16.22 мс. Совпадение.
 """)
@@ -657,7 +682,7 @@ R2 = 7.51 Ом, X2 = 0, Rн.факт = 6.3 Ом, Iкз = 23145 А, T_p = 128 м�
     st.markdown(
         "1. Расчёт для трёхфазного КЗ, а в сетях с глухозаземлённой нейтралью — и для "
         "однофазного; итог — **наименьшее** значение (п. 4.2.4).\n"
-        f"2. Каждый расчёт — дважды: без остаточной намагниченности и с K_r = {K_R_PRED} (п. 4.3).\n"
+        f"2. Каждый расчёт — дважды: без остаточной намагниченности и с K_r = {k_r_value:g} (п. 4.3).\n"
         "3. T_р.экв — по формуле (1) или по осциллограмме (п. 4.2.7).\n"
         "4. Нагрузки вторичных цепей — по Приложению А (п. 4.2.6).")
 
@@ -667,15 +692,19 @@ with tab_about:
 **ГОСТ Р 58669-2019**.
 
 **История релизов:**
-- **Релиз 1.8:** устранено дублирование примечаний (условие (5) теперь выводится один раз);
-  убрано противоречивое «справочное» время при A ≤ 1; метод по B(H) всегда показывает
-  результат (время или «насыщения нет») с выводом Bт; θ* отображается в подписи графика;
-  самопроверка показывает исходные данные каждого эталона; в Теорию добавлен разобранный
-  пример В.1.1 и исправлена таблица условий.
-- **Релиз 1.7:** метод по характеристике намагничивания (п. 5.4), графики ВАХ и B(H) в
-  Word, схема «треугольник», исправленные коэффициенты расчётной длины.
+- **Релиз 1.9:** исправлена физика типовой характеристики намагничивания B(H) — теперь
+  кривая монотонна (линейный рост до колена, затем плавное насыщение, без разрыва);
+  коэффициент остаточной намагниченности K_r задаётся пользователем: по умолчанию 0,86
+  (класс P, п. 5.1.3), чек-бокс позволяет ввести своё значение (например 0,1 для классов
+  5PR/10PR по ГОСТ Р 70507.2-2024 и заводским данным).
+- **Релиз 1.8:** устранено дублирование примечаний; убрано противоречивое «справочное»
+  время при A ≤ 1; метод по B(H) всегда показывает результат с выводом Bт; θ* отображается
+  на графике; самопроверка показывает исходные данные эталонов; в Теории — разобранный
+  пример В.1.1 и исправленная таблица условий.
+- **Релиз 1.7:** метод по характеристике намагничивания (п. 5.4), графики ВАХ и B(H) в Word,
+  схема «треугольник», исправленные коэффициенты расчётной длины.
 - **Релиз 1.6:** метод по ВАХ (п. 5.3).
-- **Релиз 1.5:** нагрузка вторичной цепи из параметров всей цепи (кабель, приборы, контакты).
+- **Релиз 1.5:** нагрузка вторичной цепи из параметров всей цепи.
 - **Релиз 1.4:** графики K_п.р в Word, ручное задание θ.
 - **Релиз 1.3:** графический метод по паспортным данным, динамические графики.
 - **Релиз 1.2:** модульная структура, диагностика файлов.
