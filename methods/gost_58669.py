@@ -1,6 +1,5 @@
 """
 Расчётное ядро: ГОСТ Р 58669-2019.
-
 Методы определения времени до насыщения:
 1) АНАЛИТИЧЕСКИЙ (раздел 5.1)
 2) ГРАФИЧЕСКИЙ ПО ПАСПОРТНЫМ ДАННЫМ (раздел 5.2, приложение Б)
@@ -22,11 +21,16 @@ OMEGA = 2.0 * math.pi * 50.0
 K_R_PRED = 0.86
 T_NAS_MIN_MS = 15.0
 T_P_RANGE_S = (0.03, 0.30)
+B_T_THRESHOLD = 1.8
 
 ST_OK = "ok"
 ST_NO_SAT = "no_saturation"
 ST_STEADY = "steady_saturation"
 ST_GRAPHIC_REQUIRED = "graphic_required"
+
+# Единый текст для условия (5), чтобы примечания разных методов не дублировались
+NOTE_A_LE_1 = ("A ≤ 1: ток КЗ превышает ток предельной кратности ТТ — эксплуатация "
+               "недопустима (условие (5) ГОСТ).")
 
 
 @dataclass
@@ -68,12 +72,11 @@ class CTParams:
 
     @property
     def alpha(self) -> float:
-        """Угол сопротивления ветви вторичного тока, рад."""
         return math.atan2(self.x_total, self.r_total) if self.z2_sigma > 0 else 0.0
 
     @property
     def cos_alpha(self) -> float:
-        """Формула (12): cos α = (R2 + Rн.факт) / z2Σ."""
+        """Формула (12)."""
         z = self.z2_sigma
         return self.r_total / z if z > 0 else 1.0
 
@@ -115,23 +118,24 @@ def _analytic(ct, kz, k_r, a) -> SaturationResult:
         notes.append(f"T_p = {kz.t_p * 1000:.0f} мс выходит за диапазон "
                      f"{T_P_RANGE_S[0] * 1000:.0f}–{T_P_RANGE_S[1] * 1000:.0f} мс.")
 
-    if k_r == 0.0 and a <= 1.0:
-        notes.append("Условие (5) ГОСТ не выполняется: A ≤ 1 — эксплуатация ТТ недопустима.")
+    if k_r == 0.0 and a <= 1.0:                       # условие (5)
+        notes.append(NOTE_A_LE_1)
         return SaturationResult(a, k_r, ST_STEADY, 0.0, notes, "analytic", None, ct.cos_alpha)
 
-    if effective <= 1.0:
+    if effective <= 1.0:                              # условие (8)
         notes.append("Условие (8) ГОСТ не выполняется: A·(1−K_r) ≤ 1 — аналитический метод "
-                     "неприменим. Используйте графические методы.")
+                     "неприменим. Используйте графические методы (п. 5.1.5).")
         return SaturationResult(a, k_r, ST_GRAPHIC_REQUIRED, None, notes, "analytic", None, ct.cos_alpha)
 
-    denom = OMEGA * kz.t_p + 1.0 - effective
+    denom = OMEGA * kz.t_p + 1.0 - effective          # условие (7)
     if denom <= 0.0:
         notes.append("Условие (7) ГОСТ не выполняется: ω·T_p + 1 ≤ A·(1−K_r) — насыщения нет.")
         return SaturationResult(a, k_r, ST_NO_SAT, None, notes, "analytic", None, ct.cos_alpha)
 
-    t_nas = kz.t_p * math.log((OMEGA * kz.t_p) / denom)
+    t_nas = kz.t_p * math.log((OMEGA * kz.t_p) / denom)   # формулы (3)/(6)
     if t_nas * 1000.0 < T_NAS_MIN_MS:
-        notes.append(f"t_нас = {t_nas * 1000:.1f} мс < {T_NAS_MIN_MS:.0f} мс — уточните графическим методом.")
+        notes.append(f"t_нас = {t_nas * 1000:.1f} мс < {T_NAS_MIN_MS:.0f} мс — уточните "
+                     "графическим методом (п. 5.1.7).")
     return SaturationResult(a, k_r, ST_OK, t_nas, notes, "analytic", None, ct.cos_alpha)
 
 
@@ -161,10 +165,8 @@ def t_nas_graphic(a: float, t_p: float, alpha: float, k_r: float = 0.0,
     n_t = int(min(12000, max(n_t, t_max / 0.0002)))
     t = np.linspace(0.0, t_max, n_t)
 
-    if theta_fixed is not None:
-        thetas = [float(theta_fixed)]
-    else:
-        thetas = np.linspace(-np.pi / 2.0, np.pi / 2.0, n_theta)
+    thetas = ([float(theta_fixed)] if theta_fixed is not None
+              else np.linspace(-np.pi / 2.0, np.pi / 2.0, n_theta))
 
     best_t: Optional[float] = None
     best_th: Optional[float] = None
@@ -201,10 +203,8 @@ def _graphic(ct, kz, k_r, a, theta_override=None) -> SaturationResult:
     manual = theta_override is not None
     t, th, why = t_nas_graphic(a, kz.t_p, ct.alpha, k_r, theta_fixed=theta_override)
 
-    if k_r == 0.0 and a <= 1.0:
-        notes.append("A ≤ 1 — эксплуатация недопустима (условие (5) ГОСТ).")
-        if t is not None:
-            notes.append(f"Расчётное время первого насыщения {t * 1000:.2f} мс (справочно).")
+    if k_r == 0.0 and a <= 1.0:                       # условие (5)
+        notes.append(NOTE_A_LE_1)
         return SaturationResult(a, k_r, ST_STEADY, 0.0, notes, "graphic", th, ct.cos_alpha, manual)
 
     if why == ST_NO_SAT or t is None:
@@ -219,40 +219,35 @@ def _graphic(ct, kz, k_r, a, theta_override=None) -> SaturationResult:
 
 
 # ---------------------------------------------------------------------------
-# МЕТОД ПО ВАХ (п. 5.3 ГОСТ Р 58669-2019)
+# МЕТОД ПО ВАХ (п. 5.3)
 # ---------------------------------------------------------------------------
 
 def build_vah_default(u_star, i0_star, r2, n_points=100):
-    """Построение типовой ВАХ ТТ. Возвращает dict с массивами i0, u, psi."""
+    """Типовая ВАХ ТТ. Возвращает dict с массивами i0, u, psi."""
     i0_max = i0_star * 3.0
     i0_arr = np.linspace(0.001, i0_max, n_points)
-
     x = i0_arr / i0_star
     y_norm = u_star / i0_star
-
     u_arr = y_norm * i0_star * (1 - np.exp(-x)) / (1 + 0.1 * x ** 2)
     u_arr = np.clip(u_arr, 0, u_star * 1.2)
-
-    psi_arr = u_arr / OMEGA
-
     return {
         'i0': i0_arr.tolist(),
         'u': u_arr.tolist(),
-        'psi': psi_arr.tolist(),
+        'psi': (u_arr / OMEGA).tolist(),
         'u_star': u_star,
         'i0_star': i0_star,
     }
 
 
 def calc_a_from_vah(u_star, u2sin):
-    """Параметр режима A по формуле (19) ГОСТ Р 58669-2019: A = U* / U2sin."""
+    """Параметр режима A по формуле (19): A = U* / U2sin."""
     if u2sin <= 0:
         raise ValueError("U2sin должен быть больше нуля.")
     return u_star / u2sin
 
 
 def calc_u2sin(ct, kz):
-    """Напряжение на вторичной обмотке при фактическом токе КЗ: U2sin = I2ном·Kфакт·z2Σ."""
+    """U2sin = I2ном · Kфакт · z2Σ."""
     k_fact = kz.i_kz / ct.i1_nom
     return ct.i2_nom * k_fact * ct.z2_sigma
 
@@ -261,103 +256,118 @@ def validate_vah_usage(u_star, i0_star, ct, kz):
     """Проверка условия (16) ГОСТ Р 58669-2019."""
     k_fact = kz.i_kz / ct.i1_nom
     i0_eps = 0.1 * ct.i2_nom * k_fact
-
     i_lin = i0_star * 0.1
     u_lin = u_star * 0.1
     u_eps = u_star * (i0_eps / i0_star) if i0_eps <= i0_star else u_star
-
     if i_lin == 0 or u_lin == 0 or u_eps == 0:
         return False, "Невозможно определить параметры линейного участка ВАХ."
-
     ratio = (i0_eps / u_eps) / (i_lin / u_lin)
     if ratio > 3:
         return True, f"Условие (16) выполняется: отношение = {ratio:.2f} > 3."
+    return False, f"Условие (16) не выполняется: отношение = {ratio:.2f} ≤ 3."
+
+
+def calculate_vah(ct, kz, u_star, i0_star, theta_override=None):
+    """Метод по ВАХ. Возвращает результаты для обоих сценариев остаточной намагниченности."""
+    valid, msg = validate_vah_usage(u_star, i0_star, ct, kz)
+    if valid:
+        u2sin = calc_u2sin(ct, kz)
+        a_vah = calc_a_from_vah(u_star, u2sin)
+        wo = _graphic(ct, kz, 0.0, a_vah, theta_override)
+        w = _graphic(ct, kz, K_R_PRED, a_vah, theta_override)
+        note = f"Метод по ВАХ: A = {a_vah:.3f} (формула 19), U* = {u_star:.1f} В"
+        wo.notes.insert(0, note)
+        w.notes.insert(0, note)
     else:
-        return False, f"Условие (16) не выполняется: отношение = {ratio:.2f} ≤ 3."
+        wo = SaturationResult(0.0, 0.0, ST_GRAPHIC_REQUIRED, None,
+                              [f"Метод по ВАХ неприменим: {msg}"], "vah", None, ct.cos_alpha)
+        w = SaturationResult(0.0, K_R_PRED, ST_GRAPHIC_REQUIRED, None,
+                             [f"Метод по ВАХ неприменим: {msg}"], "vah", None, ct.cos_alpha)
+    return {"vah_without_residual": wo, "vah_with_residual": w}
 
 
 # ---------------------------------------------------------------------------
-# МЕТОД ПО ХАРАКТЕРИСТИКЕ НАМАГНИЧИВАНИЯ (п. 5.4 ГОСТ Р 58669-2019)
+# МЕТОД ПО ХАРАКТЕРИСТИКЕ НАМАГНИЧИВАНИЯ (п. 5.4)
 # ---------------------------------------------------------------------------
 
 def build_bn_default(b_sat=1.8, h_knee=100, n_points=100):
-    """Типовая характеристика намагничивания B(H) для электротехнической стали."""
+    """Типовая характеристика намагничивания B(H)."""
     h_arr = np.linspace(0, h_knee * 5, n_points)
     mu_initial = b_sat / h_knee
     b_arr = np.where(h_arr <= h_knee,
                      mu_initial * h_arr,
                      b_sat * (1 - np.exp(-(h_arr - h_knee) / (h_knee * 0.5))))
-    return {
-        'h': h_arr.tolist(),
-        'b': b_arr.tolist(),
-        'b_sat': b_sat,
-        'h_knee': h_knee,
-    }
+    return {'h': h_arr.tolist(), 'b': b_arr.tolist(),
+            'b_sat': b_sat, 'h_knee': h_knee}
 
 
 def calc_b_from_bn(h_value, bn_data):
     """Интерполяция B по H из характеристики намагничивания."""
     h_arr = np.array(bn_data['h'], dtype=float)
     b_arr = np.array(bn_data['b'], dtype=float)
-
     if h_value <= h_arr[0]:
         return float(b_arr[0])
     if h_value >= h_arr[-1]:
         return float(b_arr[-1])
-
     idx = int(np.searchsorted(h_arr, h_value))
     h0, h1 = float(h_arr[idx - 1]), float(h_arr[idx])
     b0, b1 = float(b_arr[idx - 1]), float(b_arr[idx])
-
     if h1 == h0:
         return b0
     return float(b0 + (b1 - b0) * (h_value - h0) / (h1 - h0))
 
 
-def calc_a_from_bn(ct, kz, bn_data, w2, s, l):
-    """Параметр режима A по формуле (23) ГОСТ Р 58669-2019: A = Bт / Bт(Hг).
+def calc_b_t(ct, kz, w2, s):
+    """Амплитуда магнитной индукции по формуле (24): Bт = U2sin / (222·w2·s)."""
+    if w2 <= 0 or s <= 0:
+        return 0.0
+    u2sin = calc_u2sin(ct, kz)
+    return u2sin / (222.0 * float(w2) * float(s))
 
-    - Bт = U2sin / (222 · w2 · s)  — формула (24); s в м²
-    - Hг = I0ε · w2 / l             — формула (22)
-    - Bт(Hг)                        — из характеристики намагничивания
-    """
-    w2 = float(w2)
-    s = float(s)
-    l = float(l)
+
+def calc_a_from_bn(ct, kz, bn_data, w2, s, l):
+    """Параметр режима A по формуле (23): A = Bт / Bт(Hг)."""
+    w2, s, l = float(w2), float(s), float(l)
     if w2 <= 0 or s <= 0 or l <= 0:
         raise ValueError("Параметры w2, s, l должны быть положительными.")
-
+    b_t = calc_b_t(ct, kz, w2, s)
     k_fact = kz.i_kz / ct.i1_nom
-    u2sin = ct.i2_nom * k_fact * ct.z2_sigma
-
-    b_t = u2sin / (222.0 * w2 * s)
     i0_eps = 0.1 * ct.i2_nom * k_fact
     h_g = i0_eps * w2 / l
-
     b_t_hg = calc_b_from_bn(h_g, bn_data)
-
     if b_t_hg <= 0:
         return 1.0
-
     return b_t / b_t_hg
 
 
 def validate_bn_usage(ct, kz, bn_data, w2, s, l):
-    """Проверка условия (21) ГОСТ Р 58669-2019: Bт > 1.8 Тл."""
-    w2 = float(w2)
-    s = float(s)
-    l = float(l)
-    if w2 <= 0 or s <= 0 or l <= 0:
+    """Проверка условия (21): Bт > 1.8 Тл."""
+    if float(w2) <= 0 or float(s) <= 0 or float(l) <= 0:
         return False, "Параметры w2, s, l должны быть положительными."
+    b_t = calc_b_t(ct, kz, w2, s)
+    if b_t > B_T_THRESHOLD:
+        return True, f"Условие (21) выполняется: Bт = {b_t:.3f} Тл > {B_T_THRESHOLD} Тл."
+    return False, (f"Условие (21) не выполняется: Bт = {b_t:.3f} Тл ≤ {B_T_THRESHOLD} Тл — "
+                   "магнитопровод не насыщается при данном токе КЗ.")
 
-    k_fact = kz.i_kz / ct.i1_nom
-    u2sin = ct.i2_nom * k_fact * ct.z2_sigma
-    b_t = u2sin / (222.0 * w2 * s)
 
-    if b_t > 1.8:
-        return True, f"Условие (21) выполняется: Bт = {b_t:.3f} Тл > 1.8 Тл."
+def calculate_bn(ct, kz, bn_data, w2, s, l, theta_override=None):
+    """Метод по характеристике намагничивания. Всегда возвращает видимый результат."""
+    valid, msg = validate_bn_usage(ct, kz, bn_data, w2, s, l)
+    b_t = calc_b_t(ct, kz, w2, s)
+    if valid:
+        a_bn = calc_a_from_bn(ct, kz, bn_data, w2, s, l)
+        wo = _graphic(ct, kz, 0.0, a_bn, theta_override)
+        w = _graphic(ct, kz, K_R_PRED, a_bn, theta_override)
+        note = f"Метод по B(H): A = {a_bn:.3f} (формула 23), Bт = {b_t:.2f} Тл"
+        wo.notes.insert(0, note)
+        w.notes.insert(0, note)
     else:
-        return False, f"Условие (21) не выполняется: Bт = {b_t:.3f} Тл ≤ 1.8 Тл."
+        wo = SaturationResult(0.0, 0.0, ST_NO_SAT, None,
+                              [f"Метод по B(H): {msg}"], "bn", None, ct.cos_alpha)
+        w = SaturationResult(0.0, K_R_PRED, ST_NO_SAT, None,
+                             [f"Метод по B(H): {msg}"], "bn", None, ct.cos_alpha)
+    return {"bn_without_residual": wo, "bn_with_residual": w}
 
 
 ANALYTIC_KEYS = ("without_residual", "with_residual")
