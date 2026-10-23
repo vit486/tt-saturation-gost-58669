@@ -8,10 +8,6 @@ import streamlit as st
 try:
     from methods.gost_58669 import (
         ANALYTIC_KEYS, CTParams, GRAPHIC_KEYS, K_R_PRED, K_R_PR_DEFAULT, KZParams,
-        ST_NO_SAT, ST_OK, ST_STEADY, VAH_KEYS, BN_KEYS, build_kpr_curve, calculate,
-        btry:
-    from methods.gost_58669 import (
-        ANALYTIC_KEYS, CTParams, GRAPHIC_KEYS, K_R_PRED, K_R_PR_DEFAULT, KZParams,
         OMEGA, ST_NO_SAT, ST_OK, ST_STEADY, VAH_KEYS, BN_KEYS, build_kpr_curve,
         calculate, build_vah_default, build_bn_default, calculate_vah, calculate_bn,
         validate_bn_inputs, validate_bn_usage, effective_ct_kz, ts_fact_71879,
