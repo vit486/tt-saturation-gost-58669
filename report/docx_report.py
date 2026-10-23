@@ -1,4 +1,4 @@
-"""Отчёт Word: все методы, каскадный вывод, графики. Релиз 2.0."""
+"""Отчёт Word: все методы, каскадный вывод, графики. Релиз 2.1."""
 from __future__ import annotations
 
 import io
@@ -12,7 +12,7 @@ from docx.shared import Inches
 
 from methods.gost_58669 import (
     ANALYTIC_KEYS, GRAPHIC_KEYS, VAH_KEYS, BN_KEYS, K_R_PRED,
-    ST_NO_SAT, ST_OK, ST_STEADY, build_kpr_curve, build_bn_default,
+    ST_NO_SAT, ST_OK, ST_STEADY, build_kpr_curve, ts_fact_71879,
 )
 from methods.summary import build_summary
 
@@ -122,16 +122,18 @@ def _method_rows(res, keys, k_r, name_prefix):
 
 def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="both",
                  vah_curve=None, bn_data=None, bn_params=None, k_r=K_R_PRED, eps=10.0):
+    is_71879 = "ct_class" in chain
     doc = Document()
     doc.add_heading("Отчёт о проверке трансформатора тока", 0)
     p = doc.add_paragraph()
     p.add_run("Дата формирования: ").bold = True
     p.add_run(datetime.now().strftime("%d.%m.%Y %H:%M"))
     doc.add_paragraph(
-        "ГОСТ Р 58669-2019. Каскад методов: аналитический → графический по паспортным "
-        "данным → ВАХ → характеристика намагничивания; итог — по самому точному из "
-        "доступных. Расчёт без остаточной намагниченности и с K_r = "
-        f"{k_r:g}. Нагрузка вторичной цепи — по п. 4.2.6 и Приложению А.")
+        f"Стандарт: {chain.get('standard', 'ГОСТ Р 58669-2019')}. Каскад методов: "
+        "аналитический → графический по паспортным данным → ВАХ → характеристика "
+        "намагничивания; итог — по самому точному из доступных. Расчёт без остаточной "
+        f"намагниченности и с K_r = {k_r:g}. Нагрузка вторичной цепи — по п. 4.2.6 "
+        "и Приложению А.")
 
     doc.add_heading("1. Исходные данные", level=1)
     rows = [
@@ -148,9 +150,15 @@ def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="b
         ("Полная погрешность ε (для ВАХ и B(H))", f"{eps:g} %"),
         ("Требуемое t_нас", f"{t_req_ms:g} мс" if t_req_ms else "не задано"),
     ]
+    if is_71879:
+        rows += [
+            ("Класс точности", chain["ct_class"]),
+            ("L2 — индуктивность рассеяния", f"{chain['l2']:g} Гн"),
+            ("Ts.ном", f"{chain['ts_nom']:g} с"),
+            ("Kп.р.ном", f"{chain['kp_r_nom']:g}"),
+        ]
     if vah_curve:
-        rows.append(("ВАХ (п. 5.3)",
-                     f"{len(vah_curve['i0'])} точек, фактическая характеристика"))
+        rows.append(("ВАХ (п. 5.3)", f"{len(vah_curve['i0'])} точек"))
     if bn_data and bn_params:
         rows.append(("B(H) (п. 5.4)",
                      f"{len(bn_data['h'])} точек; w2 = {bn_params['w2']:g}, "
@@ -160,7 +168,7 @@ def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="b
     doc.add_heading("2. Промежуточные величины", level=1)
     _table(doc, ["Величина", "Значение"], [
         ("zн.ном = Sном / I2ном²", f"{ct.z_n_nom:.4f} Ом"),
-        ("z2Σном (формула 10)", f"{ct.z2_sigma_nom:.4f} Ом"),
+        ("Номинальное полное сопротивление (формула 10)", f"{ct.z2_sigma_nom:.4f} Ом"),
         ("kсх трёхфазное / однофазное КЗ",
          f"{chain['k_sch_3']:g} / {chain['k_sch_1']:g}"),
     ])
@@ -168,16 +176,20 @@ def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="b
     for idx, (ct_m, kz, res) in enumerate(results, start=3):
         doc.add_heading(f"{idx}. Режим: {kz.label}", level=1)
         r_cable = ct_m.r_load_fact - chain["r_prib"] - chain["r_per"]
-        _table(doc, ["Параметр", "Значение"], [
+        mode_rows = [
             ("Ток КЗ", f"{kz.i_kz:g} А"),
-            ("Постоянная времени T_p", f"{kz.t_p * 1000:.0f} мс"),
+            ("Постоянная времени T_а.экв", f"{kz.t_p * 1000:.0f} мс"),
             ("Фактическая кратность Kфакт", f"{kz.i_kz / ct_m.i1_nom:.2f}"),
             ("R кабеля / Rн.факт",
              f"{r_cable:.4f} / {ct_m.r_load_fact:.4f} Ом"),
-            ("z2Σ (формула 11)", f"{ct_m.z2_sigma:.4f} Ом"),
-            ("cos α (формула 12)", f"{ct_m.cos_alpha:.4f}"),
-            ("A (формула 9)", f"{res[ANALYTIC_KEYS[0]].a:.4f}"),
-        ])
+            ("Полное сопротивление ветви вторичного тока", f"{ct_m.z2_sigma:.4f} Ом"),
+            ("Параметр режима A", f"{res[ANALYTIC_KEYS[0]].a:.4f}"),
+        ]
+        if is_71879:
+            ts = ts_fact_71879(ct_m)
+            mode_rows.insert(2, ("T_s / T = min(T_а.экв, T_s)",
+                                 f"{ts * 1000:.0f} / {min(kz.t_p, ts) * 1000:.0f} мс"))
+        _table(doc, ["Параметр", "Значение"], mode_rows)
 
         all_rows = _method_rows(res, ANALYTIC_KEYS, k_r, "аналитический") + \
                    _method_rows(res, GRAPHIC_KEYS, k_r, "графический") + \
@@ -208,7 +220,7 @@ def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="b
                 doc.add_paragraph(f"(График не построен: {type(e).__name__}.)")
 
     if vah_curve:
-        doc.add_paragraph("Вольт-амперная характеристика (использованная в расчёте):").bold = True
+        doc.add_paragraph("Вольт-амперная характеристика:").bold = True
         try:
             doc.add_picture(_png_curve(vah_curve["i0"], vah_curve["u"], "I₀, А", "U, В",
                                        "ВАХ ТТ", "#d62728"), width=Inches(6))
@@ -216,7 +228,7 @@ def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="b
             doc.add_paragraph(f"(График ВАХ не построен: {type(e).__name__}.)")
 
     if bn_data:
-        doc.add_paragraph("Характеристика намагничивания (использованная в расчёте):").bold = True
+        doc.add_paragraph("Характеристика намагничивания:").bold = True
         try:
             doc.add_picture(_png_curve(bn_data["h"], bn_data["b"], "H, А/м", "B, Тл",
                                        "B(H) ТТ", "#9467bd"), width=Inches(6))
