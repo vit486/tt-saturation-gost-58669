@@ -1,5 +1,6 @@
 """⚡ Проверка ТТ на насыщение при КЗ. ГОСТ Р 58669-2019 и ГОСТ Р 71879-2024.
-Релиз 2.1."""
+Релиз 2.2: исправлена самопроверка 71879; добавлено второе КЗ (неуспешное АПВ),
+аналитический метод, формула (9)."""
 import math
 from datetime import datetime
 
@@ -8,8 +9,9 @@ import streamlit as st
 try:
     from methods.gost_58669 import (
         ANALYTIC_KEYS, CTParams, GRAPHIC_KEYS, K_R_PRED, K_R_PR_DEFAULT, KZParams,
-        OMEGA, ST_NO_SAT, ST_OK, ST_STEADY, VAH_KEYS, BN_KEYS, build_kpr_curve,
-        calculate, build_vah_default, build_bn_default, calculate_vah, calculate_bn,
+        OMEGA, ST_NO_SAT, ST_OK, ST_STEADY, VAH_KEYS, BN_KEYS, SECOND_KZ_KEYS,
+        build_kpr_curve, calculate, build_vah_default, build_bn_default,
+        calculate_vah, calculate_bn, calculate_second_kz_71879,
         validate_bn_inputs, validate_bn_usage, effective_ct_kz, ts_fact_71879,
     )
     from methods.curve_io import (
@@ -28,8 +30,8 @@ except Exception as e:
 if _ERR is not None:
     st.set_page_config(page_title="Ошибка структуры файлов")
     st.error(f"Не загружены модули: {type(_ERR).__name__}: {_ERR}")
-    st.markdown("Проверьте файлы: `methods/gost_58669.py` (`def effective_ct_kz(`), "
-                "`methods/reference_examples.py` (`def run_self_checks_71879(`), "
+    st.markdown("Проверьте файлы: `methods/gost_58669.py` (`SECOND_KZ_KEYS`), "
+                "`methods/reference_examples.py` (`EXAMPLE_71879_B1`), "
                 "`methods/curve_io.py`, `methods/summary.py`, `report/docx_report.py`.")
     st.stop()
 
@@ -38,7 +40,7 @@ import pandas as pd  # noqa: E402
 
 st.set_page_config(page_title="Проверка ТТ — ГОСТ Р 58669/71879", layout="wide", page_icon="⚡")
 st.title("⚡ Проверка трансформаторов тока")
-st.caption("ГОСТ Р 58669-2019 · ГОСТ Р 71879-2024 · каскад методов · релиз 2.1")
+st.caption("ГОСТ Р 58669-2019 · ГОСТ Р 71879-2024 · каскад методов · релиз 2.2")
 
 LBL_STAR = "θ = θ* — расчётный минимум (п. Г.3.7)"
 LBL_ZERO = "θ = 0° — максимум апериодической составляющей"
@@ -75,6 +77,8 @@ def make_scenario_title(key, k_r):
         "graphic_with_residual": "Графический (паспортные данные)",
         "vah_without_residual": "По ВАХ", "vah_with_residual": "По ВАХ",
         "bn_without_residual": "По B(H)", "bn_with_residual": "По B(H)",
+        "second_without_residual": "Второе КЗ (АПВ)",
+        "second_with_residual": "Второе КЗ (АПВ)",
     }.get(key, key)
     suffix = ("без остаточной намагниченности (K_r = 0)" if "without" in key
               else f"с остаточной намагниченностью (K_r = {k_r:g})")
@@ -93,21 +97,26 @@ with st.sidebar:
     std_code = "71879" if is_71879 else "58669"
     ct_class = None
     l2 = ts_nom = kp_r_nom = 0.0
+    use_second_kz = False
+    t_bp = None
     if is_71879:
         ct_class = st.selectbox("Класс точности", PR_CLASSES)
         l2 = st.number_input("L2 — индуктивность рассеяния, Гн", min_value=0.0,
-                             max_value=1.0, value=0.00182, step=0.00001,
-                             format="%.6f",
-                             help="Из паспорта/заводских данных. В примере Б.1 "
-                                  "ГОСТ Р 71879-2024: L2 = 0,00182 Гн.")
+                             max_value=1.0, value=0.00182, step=0.00001, format="%.6f",
+                             help="Из паспорта/заводских данных. В примере Б.1: L2 = 0,00182 Гн.")
         ts_nom = st.number_input("Ts.ном — постоянная времени контура, с",
                                  min_value=0.01, max_value=10.0, value=0.507,
                                  step=0.001, format="%.3f",
-                                 help="В примере Б.1 ГОСТ Р 71879-2024: Ts.ном = 0,507 с.")
+                                 help="В примере Б.1: Ts.ном = 0,507 с.")
         kp_r_nom = st.number_input(
             "Kп.р.ном — коэфф. переходного режима", min_value=1.0, max_value=100.0,
             value=1.0 if ct_class in ("5PR", "10PR") else 10.0, step=1.0,
-            help="Для 5PR/10PR принимается равным 1; для TPY/TPZ/TPE — по паспорту.")
+            help="Для 5PR/10PR = 1; для TPY/TPZ/TPE — по паспорту.")
+        use_second_kz = st.checkbox("Второе КЗ — неуспешное АПВ (п. 5.1.6)", value=False)
+        if use_second_kz:
+            t_bp = st.number_input("t_б.п — бестоковая пауза АПВ (t2−tкз1), с",
+                                   min_value=0.0, max_value=5.0, value=1.0, step=0.05,
+                                   format="%.3f", help="В примере Б.1: t_б.п = 1,0 с.")
 
     st.subheader("Начальная фаза θ")
     manual_theta = st.checkbox("Задать θ вручную", value=False)
@@ -121,9 +130,9 @@ with st.sidebar:
     k_r_default = K_R_PR_DEFAULT if is_71879 else K_R_PRED
     custom_kr = st.checkbox(
         "Задать K_r вручную", value=False,
-        help=f"По умолчанию: {K_R_PRED} для классов по ГОСТ Р 58669-2019 (п. 5.1.3); "
-             f"{K_R_PR_DEFAULT} для 5PR/10PR/TPY/TPZ без паспортных данных "
-             "(ГОСТ Р 70507.2-2024). В примере Б.1 — 0,085 по паспорту.")
+        help=f"По умолчанию: {K_R_PRED} для классов по ГОСТ Р 58669-2019; "
+             f"{K_R_PR_DEFAULT} для 5PR/10PR/TPY/TPZ без паспортных данных. "
+             "В примере Б.1 — 0,085 по паспорту.")
     if custom_kr:
         k_r = st.number_input("K_r", min_value=0.0, max_value=1.0,
                               value=k_r_default, step=0.01, format="%.3f")
@@ -177,7 +186,7 @@ with st.sidebar:
                             min_value=0.0, max_value=500.0, value=0.0, step=5.0)
 
 # ---------------------------------------------------------------------------
-# Вспомогательные функции
+# Вспомогательные функции отображения
 # ---------------------------------------------------------------------------
 def fmt_t(r):
     if r is None:
@@ -296,8 +305,7 @@ with tab_chars:
                 init = pd.DataFrame({"I0, А": [0.01, 0.05, 0.10, 0.30, 0.60, 1.20],
                                      "U, В": [5.0, 24.0, 47.0, 98.0, 120.0, 132.0]})
                 src_df = st.data_editor(init, num_rows="dynamic", key="vah_manual")
-                st.caption("Первая колонка — I₀ (А), вторая — U (В). Строки можно "
-                           "добавлять/удалять.")
+                st.caption("Первая колонка — I₀ (А), вторая — U (В).")
             if src_df is not None and len(src_df):
                 try:
                     ok, warns, xs, ys = curve_from_dataframe(src_df)
@@ -390,7 +398,7 @@ chain = {"scheme": scheme, "material": f"{mat} (ρ = {rho} Ом·мм²/м, 20 �
          "standard": standard_name}
 if is_71879:
     chain.update({"ct_class": ct_class, "l2": l2, "ts_nom": ts_nom,
-                  "kp_r_nom": kp_r_nom})
+                  "kp_r_nom": kp_r_nom, "use_second_kz": use_second_kz, "t_bp": t_bp})
 
 ct3 = CTParams(i1_nom, i2_nom, k_nom, s_nom, cos_phi, r2, x2, r_n3, x_load,
                l2=l2, ts_nom=ts_nom, kp_r_nom=kp_r_nom)
@@ -404,6 +412,7 @@ if use_kz1:
 
 vah_active = bool(use_vah and vah_table is not None)
 bn_active = bool(use_bn and bn_data is not None and bn_inputs_ok)
+second_active = bool(use_second_kz and is_71879 and t_bp is not None)
 
 try:
     with st.spinner("Каскадный расчёт методов…"):
@@ -419,6 +428,8 @@ try:
                 res.update(calculate_bn(ct_eff, kz_eff, bn_data, bn_params["w2"],
                                         bn_params["s"], bn_params["l"],
                                         theta_override, k_r, eps))
+            if second_active:
+                res.update(calculate_second_kz_71879(ct_m, kz, k_r, t_bp))
             results.append((ct_m, kz, res))
 except ValueError as e:
     st.error(f"Ошибка исходных данных: {e}")
@@ -426,6 +437,24 @@ except ValueError as e:
 
 summary_rows, verdict, summary_lines, primary = build_summary(
     results, vah_active, bn_active, t_req)
+
+# Учёт второго КЗ в итоговой оценке
+second_kz_min_ms = None
+if second_active:
+    t2_vals = []
+    for ct_m, kz, res in results:
+        for key in SECOND_KZ_KEYS:
+            r = res.get(key)
+            if r is not None and r.status == ST_OK and r.t_nas is not None:
+                t2_vals.append(r.t_nas * 1000.0)
+    if t2_vals:
+        second_kz_min_ms = min(t2_vals)
+        if t_req > 0 and second_kz_min_ms < t_req:
+            verdict = "danger"
+            summary_lines.append(f"Второе КЗ (АПВ): наименьшее t″нас = {second_kz_min_ms:.2f} мс "
+                                 f"< требуемого {t_req:g} мс — условие НЕ выполняется.")
+        else:
+            summary_lines.append(f"Второе КЗ (АПВ): наименьшее t″нас = {second_kz_min_ms:.2f} мс.")
 
 # ---------------------------------------------------------------------------
 # Вкладка «Результаты»
@@ -454,7 +483,8 @@ with tab_res:
 
         seen = set()
         for keys, _ in ((ANALYTIC_KEYS, "Аналитический"), (GRAPHIC_KEYS, "Графический"),
-                        (VAH_KEYS, "По ВАХ"), (BN_KEYS, "По B(H)")):
+                        (VAH_KEYS, "По ВАХ"), (BN_KEYS, "По B(H)"),
+                        (SECOND_KZ_KEYS, "Второе КЗ (АПВ)")):
             present = [k for k in keys if k in res]
             if not present:
                 continue
@@ -529,12 +559,13 @@ with tab_check:
         st.error("❌ Расхождение с эталонами 58669")
     st.dataframe(ra, hide_index=True)
 
-    st.markdown("#### ГОСТ Р 71879-2024 — Приложение Б (пример Б.1, 10PR 2000/1)")
+    st.markdown("#### ГОСТ Р 71879-2024 — Приложение Б (пример Б.1: первое и второе КЗ)")
     st.caption("Исходные данные: I1ном=2000 А, I2ном=1 А, Kном=40, Sном=20 ВА, cos φ=0,8, "
-               "R2=6,96 Ом, L2=0,00182 Гн, Ts.ном=0,507 с (восстановлено из примера), "
-               "Kп.р.ном=1, K_r=0,085; Rн=6,3/12,6 Ом; Iкз=23145/26900 А; Tа=128/180 мс.")
+               "R2=6,96 Ом, L2=0,00182 Гн, Ts.ном=0,507 с, Kп.р.ном=1, K_r=0,085, "
+               "t_б.п=1,0 с; Rн=6,3/12,6 Ом; Iкз=23145/26900 А; Tа=128/180 мс. "
+               "Эталоны времени первого КЗ — по формуле (6) с K_r=0,085.")
     if ok71:
-        st.success("✅ Пример Б.1 воспроизведён (A, Ts, t′ — по обоим видам КЗ)")
+        st.success("✅ Пример Б.1 воспроизведён (A, Ts, t′ и t″ — по обоим видам КЗ)")
     else:
         st.error("❌ Расхождение с примером Б.1")
     st.dataframe(r71, hide_index=True)
@@ -554,69 +585,64 @@ with tab_check:
 # ---------------------------------------------------------------------------
 with tab_theory:
     st.markdown("### 1. Два стандарта на время до насыщения")
-    st.markdown("**ГОСТ Р 58669-2019** — классы P, PX, TPX (замкнутый магнитопровод, "
-                "остаточная намагниченность не ограничена, K_r = 0,86).\n\n"
-                "**ГОСТ Р 71879-2024** — классы 5PR, 10PR, TPY, TPZ, TPE (нормируемая "
-                "погрешность в переходных режимах, ограниченное остаточное потоко­сцепление, "
-                "K_r по паспорту, при отсутствии данных — 0,1). Отличия: в z2Σ входит ω·L2, "
-                "A умножается на Kп.р.ном, расчётная постоянная T = min(T_а.экв, T_s), где "
-                "T_s — фактическая постоянная времени вторичного контура.")
+    st.markdown("**ГОСТ Р 58669-2019** — классы P, PX, TPX (K_r = 0,86).\n\n"
+                "**ГОСТ Р 71879-2024** — классы 5PR, 10PR, TPY, TPZ, TPE (K_r по паспорту, "
+                "при отсутствии — 0,1). Отличия: в z2Σ входит ω·L2; A умножается на Kп.р.ном; "
+                "T = min(T_а.экв, T_s), где T_s — фактическая постоянная времени контура.")
     st.markdown("### 2. Формулы ГОСТ Р 58669-2019")
-    st.code("z2Σном = √((R2 + zн.ном·cos φ)² + (X2 + zн.ном·sin φ)²)    (10)\n"
-            "z2Σ    = √((R2 + Rн.факт)² + (X2 + Xн.факт)²)              (11)\n"
-            "A      = I1ном·Kном·z2Σном / (Iкз·z2Σ)                      (9)\n"
-            "t_нас  = T_p·ln( ω·T_p / (ω·T_p + 1 − A·(1−K_r)) )         (3), (6)",
+    st.code("A     = I1ном·Kном·z2Σном / (Iкз·z2Σ)                       (9)\n"
+            "t_нас = T_p·ln( ω·T_p / (ω·T_p + 1 − A·(1−K_r)) )          (3), (6)",
             language="text")
-    st.markdown("### 3. Формулы ГОСТ Р 71879-2024 (первое КЗ)")
-    st.code("z2Σ    = √((R2 + Rн.факт)² + (ω·L2 + Xн.факт)²)\n"
-            "z2Σном = √((R2 + zн.ном·cos φном)² + (ω·L2 + zн.ном·sin φном)²)\n"
-            "A      = I1ном·Kном·Kп.р.ном·z2Σном / (Iкз·z2Σ)               (4)\n"
-            "T_s    = Ts.ном·(R2 + zн.ном·cos φном) / (R2 + Rн.факт)       (5)\n"
-            "T      = min(T_а.экв, T_s)\n"
-            "t′_нас = T·ln( ω·T / (ω·T + 1 − A·(1−K_r)) )                  (6)",
+    st.markdown("### 3. Формулы ГОСТ Р 71879-2024 — первое КЗ")
+    st.code("A     = I1ном·Kном·Kп.р.ном·z2Σном / (Iкз·z2Σ)               (4)\n"
+            "T_s   = Ts.ном·(R2 + zн.ном·cos φном) / (R2 + Rн.факт)      (5)\n"
+            "T     = min(T_а.экв, T_s)\n"
+            "t′нас = T·ln( ω·T / (ω·T + 1 − A·(1−K_r)) )                  (6)",
             language="text")
-    st.warning("Формула (5) для T_s восстановлена по результатам примера Б.1 — текст "
-               "раздела 5 стандарта будет сверен дополнительно (см. «О приложении»).")
-    st.markdown("### 4. Условия применимости")
+    st.markdown("### 4. Второе КЗ — неуспешное АПВ (п. 5.1.6)")
+    st.code("t″нас = T·ln( ω·T / (ω·T + 1 − A·(1−K_r) + A·e^(−t_б.п/T_s)) )   (9)",
+            language="text")
+    st.markdown("Условия: **(10)** ω·T + 1 > A·(1−K_r) − A·e^(−t_б.п/T_s) — насыщение "
+                "существует; **(11)** A·(1−K_r) − A·e^(−t_б.п/T_s) > 1 — время положительно. "
+                "Член A·e^(−t_б.п/T_s) учитывает затухание остаточного потока за бестоковую "
+                "паузу; второе КЗ насыщает ТТ быстрее первого.")
+    st.markdown("### 5. Условия применимости")
     st.markdown("""
 | Условие | Если выполняется | Если НЕ выполняется |
 |---|---|---|
 | A > 1 (усл. 5) | предельный ток больше тока КЗ | эксплуатация недопустима |
-| ωT + 1 > A (усл. 4) | насыщение при конечном t | насыщения нет |
 | A(1−K_r) > 1 (усл. 8) | формула времени применима | графический метод (п. 5.1.5) |
 | ωT + 1 > A(1−K_r) (усл. 7) | насыщение при конечном t | насыщения нет |
 | t_нас ≥ 15 мс (п. 5.1.7) | аналитика точна | уточнить графически |
-| (I0ε/Uε)/(Iлин/Uлин) > 3 (усл. 16) | ВАХ-метод применим | ВАХ-метод неприменим |
-| B_me(H_e) ≥ 1,8 Тл (усл. 21) | B(H)-метод применим | B(H)-метод неприменим |
+| (I0ε/Uε)/(Iлин/Uлин) > 3 (16) | ВАХ-метод применим | ВАХ-метод неприменим |
+| B_me(H_e) ≥ 1,8 Тл (21) | B(H)-метод применим | B(H)-метод неприменим |
 """)
-    st.markdown("### 5. ВАХ и B(H): формулы и источники данных")
-    st.code("ВАХ:  I0ε = (ε/100)·I2ном·Kфакт  (17);  U2sin = Kфакт·I2ном·z2Σ  (20)\n"
-            "      A = Uε / U2sin  (19)\n"
-            "B(H): H_e = I0ε·w2 / l  (22);  B_m = U2sin / (222·w2·s)  (24)\n"
-            "      A = B_me / B_m  (23)", language="text")
-    st.markdown("**ВАХ** — паспорт ТТ или измерения (ГОСТ Р 70507.2-2024, п. 6.7.5, 9.17; "
-                "РД 153-34.0-35.301-2002). **B(H)** — w2, s, l из паспорта "
-                "(пример В.4.1.1: «w2 = 1997, s = 13,125 см², l = 1,437 м»); кривая — "
-                "заводские данные или измерения.")
-    st.markdown("### 6. Разобранный пример В.1.1 (58669)")
+    st.markdown("### 6. ВАХ и B(H): формулы и источники")
+    st.code("ВАХ:  I0ε=(ε/100)·I2ном·Kфакт (17); U2sin=Kфакт·I2ном·z2Σ (20); A=Uε/U2sin (19)\n"
+            "B(H): H_e=I0ε·w2/l (22); B_m=U2sin/(222·w2·s) (24); A=B_me/B_m (23)",
+            language="text")
+    st.markdown("**ВАХ** — паспорт/измерения (ГОСТ Р 70507.2-2024, п. 6.7.5, 9.17; "
+                "РД 153-34.0-35.301-2002). **B(H)** — w2, s, l из паспорта (пример В.4.1.1); "
+                "кривая — заводские данные или измерения.")
+    st.markdown("### 7. Разобранный пример В.1.1 (58669)")
     st.markdown("A = 5,785; ωT_p = 40,21; t_нас = 0,128·ln(40,21/35,43) = **16,22 мс**.")
 
+# ---------------------------------------------------------------------------
+# Вкладка «О приложении»
+# ---------------------------------------------------------------------------
 with tab_about:
     st.markdown("""
-**Релиз 2.1:** поддержка ГОСТ Р 71879-2024 — классы 5PR/10PR/TPY/TPZ/TPE, первое КЗ:
-параметры L2, Ts.ном, Kп.р.ном; T = min(T_а.экв, T_s); A с множителем Kп.р.ном и ω·L2
-в z2Σ; K_r по умолчанию 0,1; самопроверка по примеру Б.1.
+**Релиз 2.2:** исправлена самопроверка ГОСТ Р 71879-2024 (сравнение со сценарием
+«с остаточной намагниченностью», как в эталоне Б.1); добавлено **второе КЗ (неуспешное
+АПВ)** — аналитический метод по формуле (9) с условиями (10), (11); самопроверка по Б.1.5
+(t″ = 10,12 / 6,15 мс).
 
-**Не реализовано в 2.1 (релиз 2.2):** второе КЗ (АПВ) по формулам (9), (12), (13),
-(В.30)–(В.32) ГОСТ Р 71879-2024 — текст формул требует сверки с оригиналом.
+**Отложено на 2.3:** графическое второе КЗ (формулы 12–14) и второе КЗ в Word-отчёте.
 
-**Ранее:** 2.0 — ввод ВАХ и B(H) из файла/вручную; 1.10 — каскад методов (summary);
-1.9 — монотонная B(H), ручной K_r; 1.8 — прозрачная самопроверка; 1.7 — метод B(H);
-1.6 — метод ВАХ; 1.5 — кабель; 1.4 — графики в Word; 1.3 — графический метод;
-1.2 — модули; 1.1 — корректная формула t_нас.
-
-**Поправки к стандартам:** к ГОСТ Р 58669-2019 учтена Поправка (ИУС 6–7, 2020).
-К стандартам 2024 г. поправок в переданных редакциях нет; при появлении — будут внесены.
+**Ранее:** 2.1 — поддержка 71879 (первое КЗ); 2.0 — ввод ВАХ и B(H) из файла/вручную;
+1.10 — каскад методов; 1.9 — монотонная B(H), ручной K_r; 1.8 — прозрачная самопроверка;
+1.7 — метод B(H); 1.6 — метод ВАХ; 1.5 — кабель; 1.4 — графики в Word; 1.3 — графический
+метод; 1.2 — модули; 1.1 — корректная формула t_нас.
 """)
 
 # === КОНЕЦ ФАЙЛА app.py ===
