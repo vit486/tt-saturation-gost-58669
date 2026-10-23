@@ -1,7 +1,6 @@
 """
-Расчётное ядро: ГОСТ Р 58669-2019, раздел 5.
-1) аналитический (5.1); 2) графический по паспортным данным (5.2);
-3) графический по ВАХ (5.3); 4) графический по характеристике намагничивания (5.4).
+Расчётное ядро: ГОСТ Р 58669-2019 (классы P, PX, TPX) и ГОСТ Р 71879-2024
+(классы 5PR, 10PR, TPY, TPZ, TPE — первое КЗ). Релиз 2.1.
 """
 from __future__ import annotations
 
@@ -15,10 +14,11 @@ except ImportError:
     np = None
 
 OMEGA = 2.0 * math.pi * 50.0
-K_R_PRED = 0.86
+K_R_PRED = 0.86          # класс P по ГОСТ Р 58669-2019, п. 5.1.3
+K_R_PR_DEFAULT = 0.1     # 5PR/10PR/TPY/TPZ без паспортных данных (ГОСТ Р 70507.2-2024)
 T_NAS_MIN_MS = 15.0
 T_P_RANGE_S = (0.03, 0.30)
-B_ME_THRESHOLD = 1.8   # п. 5.4.2, условие (21): B_me(H) >= 1,8 Тл
+B_ME_THRESHOLD = 1.8
 
 ST_OK = "ok"
 ST_NO_SAT = "no_saturation"
@@ -36,6 +36,7 @@ BN_KEYS = ("bn_without_residual", "bn_with_residual")
 
 @dataclass
 class CTParams:
+    """Паспортные данные ТТ. Поля l2, ts_nom, kp_r_nom — только для ГОСТ Р 71879-2024."""
     i1_nom: float
     i2_nom: float
     k_nom: float
@@ -45,6 +46,9 @@ class CTParams:
     x2: float
     r_load_fact: float
     x_load_fact: float
+    l2: float = 0.0          # индуктивность рассеяния вторичной обмотки, Гн
+    ts_nom: float = 0.0      # номинальная постоянная времени вторичного контура, с
+    kp_r_nom: float = 1.0    # номинальный коэффициент переходного режима
 
     @property
     def z_n_nom(self) -> float:
@@ -52,6 +56,7 @@ class CTParams:
 
     @property
     def z2_sigma_nom(self) -> float:
+        """Формула (10) 58669. Для 71879 подставляется x2 = ω·L2."""
         sin_phi = math.sqrt(max(0.0, 1.0 - self.cos_phi_nom ** 2))
         return math.sqrt((self.r2 + self.z_n_nom * self.cos_phi_nom) ** 2
                          + (self.x2 + self.z_n_nom * sin_phi) ** 2)
@@ -66,6 +71,7 @@ class CTParams:
 
     @property
     def z2_sigma(self) -> float:
+        """Формула (11) 58669. Для 71879 подставляется x2 = ω·L2."""
         return math.sqrt(self.r_total ** 2 + self.x_total ** 2)
 
     @property
@@ -100,10 +106,39 @@ class SaturationResult:
 
 
 # ---------------------------------------------------------------------------
-# Аналитический метод (5.1)
+# ГОСТ Р 71879-2024: эффективные параметры (формулы (4), (5))
+# ---------------------------------------------------------------------------
+
+def ts_fact_71879(ct: CTParams) -> float:
+    """Формула (5) ГОСТ Р 71879-2024: фактическая постоянная времени вторичного
+    контура. Вид формулы восстановлен по примеру Б.1 стандарта — подлежит сверке
+    с текстом раздела 5."""
+    denom = ct.r2 + ct.r_load_fact
+    if denom <= 0 or ct.ts_nom <= 0:
+        return 0.0
+    return ct.ts_nom * (ct.r2 + ct.z_n_nom * ct.cos_phi_nom) / denom
+
+
+def effective_ct_kz(ct: CTParams, kz: KZParams, standard: str):
+    """Для 71879: z2Σ учитывает ω·L2, A — множитель Kп.р.ном, T = min(Tа.экв, Ts).
+    Возвращает (ct_eff, kz_eff, ts, t_eff)."""
+    if standard != "71879":
+        return ct, kz, None, kz.t_p
+    ts = ts_fact_71879(ct)
+    t_eff = min(kz.t_p, ts) if ts > 0 else kz.t_p
+    ct_eff = CTParams(ct.i1_nom, ct.i2_nom, ct.k_nom * ct.kp_r_nom, ct.s_nom,
+                      ct.cos_phi_nom, ct.r2, OMEGA * ct.l2,
+                      ct.r_load_fact, ct.x_load_fact)
+    kz_eff = KZParams(kz.i_kz, t_eff, kz.label)
+    return ct_eff, kz_eff, ts, t_eff
+
+
+# ---------------------------------------------------------------------------
+# Общий расчётный контур (используется обоими стандартами)
 # ---------------------------------------------------------------------------
 
 def calc_a_param(ct: CTParams, kz: KZParams) -> float:
+    """Формула (9) 58669 / (4) 71879 — единый вид при эффективных параметрах."""
     if kz.i_kz <= 0:
         raise ValueError("Ток КЗ должен быть больше нуля.")
     if ct.z2_sigma == 0:
@@ -130,9 +165,9 @@ def _analytic(ct, kz, k_r, a) -> SaturationResult:
         return SaturationResult(a, k_r, ST_GRAPHIC_REQUIRED, None, notes, "analytic",
                                 cos_alpha=ct.cos_alpha)
 
-    denom = OMEGA * kz.t_p + 1.0 - effective
-    if denom <= 0.0:                                  # условие (7)
-        notes.append("Условие (7) не выполняется: насыщение отсутствует.")
+    denom = OMEGA * kz.t_p + 1.0 - effective          # условие (7)
+    if denom <= 0.0:
+        notes.append("Условие (7) не выполняется: ω·T_p + 1 ≤ A·(1−K_r) — насыщения нет.")
         return SaturationResult(a, k_r, ST_NO_SAT, None, notes, "analytic",
                                 cos_alpha=ct.cos_alpha)
 
@@ -143,11 +178,8 @@ def _analytic(ct, kz, k_r, a) -> SaturationResult:
     return SaturationResult(a, k_r, ST_OK, t, notes, "analytic", cos_alpha=ct.cos_alpha)
 
 
-# ---------------------------------------------------------------------------
-# Графический метод по паспортным данным (5.2), формула (Г.15)
-# ---------------------------------------------------------------------------
-
 def k_pr(t, t_p, alpha, theta):
+    """Коэффициент переходного режима K_п.р(t) — формула (Г.15)."""
     if np is None:
         raise RuntimeError("Требуется numpy.")
     t_arr = np.asarray(t, dtype=float)
@@ -158,8 +190,7 @@ def k_pr(t, t_p, alpha, theta):
             + math.cos(alpha) * math.sin(theta))
 
 
-def t_nas_graphic(a, t_p, alpha, k_r=0.0, n_theta=361, n_t=4000,
-                  theta_fixed=None) -> Tuple[Optional[float], Optional[float], str]:
+def t_nas_graphic(a, t_p, alpha, k_r=0.0, n_theta=361, n_t=4000, theta_fixed=None):
     if np is None:
         raise RuntimeError("Требуется numpy.")
     eff = a * (1.0 - k_r)
@@ -202,8 +233,7 @@ def _graphic(ct, kz, k_r, a, theta_override=None, method="graphic", detail="") \
     notes: List[str] = []
     manual = theta_override is not None
 
-    # Условие (5) не зависит от K_r: при A <= 1 оба сценария одинаковы
-    if a <= 1.0:
+    if a <= 1.0:                                      # условие (5) — не зависит от K_r
         notes.append(NOTE_A_LE_1)
         return SaturationResult(a, k_r, ST_STEADY, 0.0, notes, method,
                                 cos_alpha=ct.cos_alpha, theta_manual=manual, detail=detail)
@@ -223,11 +253,10 @@ def _graphic(ct, kz, k_r, a, theta_override=None, method="graphic", detail="") \
 
 
 # ---------------------------------------------------------------------------
-# ВАХ (5.3): условие (16), формулы (17), (19), (20)
+# ВАХ (п. 5.3): (16), (17), (19), (20)
 # ---------------------------------------------------------------------------
 
 def build_vah_default(u_star, i0_star, r2, n_points=200):
-    """Типовая монотонная ВАХ: линейный участок до I0*, далее пологий рост."""
     if np is None:
         raise RuntimeError("Требуется numpy.")
     i0_arr = np.linspace(0.0, 3.0 * i0_star, n_points)
@@ -255,10 +284,7 @@ def calc_u2sin(ct, kz):
 
 
 def validate_vah_usage(u_star, i0_star, ct, kz, eps=10.0, vah_table=None):
-    """Условие (16): (I0ε/Uε)/(Iлин/Uлин) > 3 — отношение проводимостей.
-
-    I0ε — по формуле (17): I0ε = (ε/100)·I2ном·Kфакт.
-    """
+    """Условие (16): (I0ε/Uε)/(Iлин/Uлин) > 3."""
     table = vah_table or build_vah_default(u_star, i0_star, ct.r2)
     i0s, us = table['i0'], table['u']
     k_fact = kz.i_kz / ct.i1_nom
@@ -266,36 +292,34 @@ def validate_vah_usage(u_star, i0_star, ct, kz, eps=10.0, vah_table=None):
     u_eps = _interp(i0_eps, i0s, us)
     if u_eps <= 0 or i0_eps <= 0:
         return False, "Не удалось определить Uε по ВАХ.", ""
-    # Линейный участок: последняя точка с током не более 10% от I0ε
-    lin_idx = [i for i, v in enumerate(i0s) if 0 < v <= 0.1 * i0_eps]
-    if not lin_idx:
+    lin = [i for i, v in enumerate(i0s) if 0 < v <= 0.1 * i0_eps]
+    if not lin:
         return False, "На ВАХ не выделен линейный участок.", ""
-    i_lin, u_lin = i0s[lin_idx[-1]], us[lin_idx[-1]]
+    i_lin, u_lin = i0s[lin[-1]], us[lin[-1]]
     if u_lin <= 0:
         return False, "Неверный линейный участок ВАХ.", ""
     ratio = (i0_eps / u_eps) / (i_lin / u_lin)
-    detail = (f"I0ε = {i0_eps:.3f} А, Uε = {u_eps:.1f} В; "
-              f"отношение проводимостей = {ratio:.2f} (нужно > 3)")
+    detail = f"I0ε = {i0_eps:.3f} А, Uε = {u_eps:.1f} В, отношение проводимостей = {ratio:.2f}"
     if ratio > 3.0:
-        return True, f"Условие (16) выполняется: {detail}.", detail
-    return False, f"Условие (16) не выполняется: {detail}.", detail
+        return True, f"Условие (16) выполняется: {detail} (> 3).", detail
+    return False, f"Условие (16) не выполняется: {detail} (нужно > 3).", detail
 
 
 def calculate_vah(ct, kz, u_star, i0_star, theta_override=None, k_r=K_R_PRED,
                   eps=10.0, vah_table=None):
     valid, msg, detail = validate_vah_usage(u_star, i0_star, ct, kz, eps, vah_table)
     if not valid:
-        return {
-            "vah_without_residual": SaturationResult(
-                0.0, 0.0, ST_GRAPHIC_REQUIRED, None, [msg], "vah", cos_alpha=ct.cos_alpha),
-            "vah_with_residual": SaturationResult(
-                0.0, k_r, ST_GRAPHIC_REQUIRED, None, [msg], "vah", cos_alpha=ct.cos_alpha),
-        }
+        return {"vah_without_residual": SaturationResult(0.0, 0.0, ST_GRAPHIC_REQUIRED,
+                                                         None, [f"ВАХ: {msg}"], "vah",
+                                                         cos_alpha=ct.cos_alpha),
+                "vah_with_residual": SaturationResult(0.0, k_r, ST_GRAPHIC_REQUIRED,
+                                                      None, [f"ВАХ: {msg}"], "vah",
+                                                      cos_alpha=ct.cos_alpha)}
     table = vah_table or build_vah_default(u_star, i0_star, ct.r2)
     i0_eps = (eps / 100.0) * ct.i2_nom * (kz.i_kz / ct.i1_nom)
     u_eps = _interp(i0_eps, table['i0'], table['u'])
     u2sin = calc_u2sin(ct, kz)
-    a = u_eps / u2sin                                           # (19)
+    a = u_eps / u2sin                                             # (19)
     det = f"U2sin = {u2sin:.1f} В, Uε = {u_eps:.1f} В, A = {a:.3f}"
     wo = _graphic(ct, kz, 0.0, a, theta_override, "vah", det)
     w = _graphic(ct, kz, k_r, a, theta_override, "vah", det)
@@ -305,11 +329,10 @@ def calculate_vah(ct, kz, u_star, i0_star, theta_override=None, k_r=K_R_PRED,
 
 
 # ---------------------------------------------------------------------------
-# Характеристика намагничивания (5.4): (21), (22), (17), (23), (24)
+# B(H) (п. 5.4): (21)–(24)
 # ---------------------------------------------------------------------------
 
 def build_bn_default(b_sat=1.8, h_knee=100, n_points=200):
-    """Монотонная B(H): линейный рост до колена, затем плавное насыщение."""
     if np is None:
         raise RuntimeError("Требуется numpy.")
     h_arr = np.linspace(0.0, h_knee * 20, n_points)
@@ -327,64 +350,55 @@ def calc_b_from_bn(h_value, bn_data):
 
 
 def calc_b_m(ct, kz, w2, s):
-    """Формула (24): рабочая амплитуда индукции B_m = U2sin/(222·w2·s), с — в м²."""
+    """Формула (24): B_m = U2sin / (222·w2·s), s в м²."""
     if w2 <= 0 or s <= 0:
         return 0.0
     return calc_u2sin(ct, kz) / (222.0 * float(w2) * float(s))
 
 
 def validate_bn_inputs(w2, s, l, b_sat, h_knee):
-    """Контроль корректности вводимых конструктивных параметров."""
     errs = []
     if w2 < 1 or w2 > 100000:
-        errs.append("w2 вне разумного диапазона 1…100000 витков")
+        errs.append("w2 вне диапазона 1…100000 витков")
     if not (1e-5 <= s <= 0.1):
         errs.append("s вне диапазона 0,1…1000 см²")
     if not (0.01 <= l <= 10.0):
         errs.append("l вне диапазона 0,01…10 м")
     if not (0.5 <= b_sat <= 2.5):
-        errs.append("Bнас вне диапазона 0,5…2,5 Тл для электротехнической стали")
+        errs.append("Bнас вне диапазона 0,5…2,5 Тл")
     if not (1.0 <= h_knee <= 10000.0):
         errs.append("Hколено вне диапазона 1…10000 А/м")
     return (len(errs) == 0), "; ".join(errs)
 
 
 def validate_bn_usage(ct, kz, bn_data, w2, s, l, eps=10.0):
-    """П. 5.4.2, условие (21): B_me(H_e) >= 1,8 Тл.
-
-    H_e = I0ε·w2/l — формула (22); I0ε — формула (17).
-    B_me берётся ИЗ ХАРАКТЕРИСТИКИ НАМАГНИЧИВАНИЯ, а не является рабочей B_m.
-    """
+    """Условие (21): B_me(H_e) ≥ 1,8 Тл; H_e = I0ε·w2/l — формула (22)."""
     ok, msg = validate_bn_inputs(w2, s, l, bn_data.get('b_sat', 1.8),
                                  bn_data.get('h_knee', 100))
     if not ok:
-        return False, "Проверка входов: " + msg + ".", "", ""
-    i0_eps = (eps / 100.0) * ct.i2_nom * (kz.i_kz / ct.i1_nom)       # (17)
-    h_e = i0_eps * float(w2) / float(l)                             # (22)
+        return False, "Проверка входов: " + msg + ".", "", 0.0
+    i0_eps = (eps / 100.0) * ct.i2_nom * (kz.i_kz / ct.i1_nom)   # (17)
+    h_e = i0_eps * float(w2) / float(l)                          # (22)
     b_me = calc_b_from_bn(h_e, bn_data)
-    b_m = calc_b_m(ct, kz, w2, s)                                   # (24)
+    b_m = calc_b_m(ct, kz, w2, s)
     detail = f"H_e = {h_e:.1f} А/м, B_me(H_e) = {b_me:.3f} Тл, B_m = {b_m:.3f} Тл"
     if b_me >= B_ME_THRESHOLD:
         return True, f"Условие (21) выполняется: {detail}.", detail, b_me
-    return False, (f"Условие (21) НЕ выполняется: {detail}. "
-                   f"Нужно B_me(H_e) ≥ {B_ME_THRESHOLD} Тл — метод неприменим "
-                   "к данной характеристике при этом токе КЗ."), detail, b_me
+    return False, (f"Условие (21) не выполняется: {detail} — метод неприменим "
+                   f"при этом токе КЗ."), detail, b_me
 
 
-def calculate_bn(ct, kz, bn_data, w2, s, l, theta_override=None, k_r=K_R_PRED,
-                 eps=10.0):
+def calculate_bn(ct, kz, bn_data, w2, s, l, theta_override=None, k_r=K_R_PRED, eps=10.0):
     valid, msg, detail, b_me = validate_bn_usage(ct, kz, bn_data, w2, s, l, eps)
     if not valid:
-        return {
-            "bn_without_residual": SaturationResult(
-                0.0, 0.0, ST_GRAPHIC_REQUIRED, None, [msg], "bn",
-                cos_alpha=ct.cos_alpha, detail=detail),
-            "bn_with_residual": SaturationResult(
-                0.0, k_r, ST_GRAPHIC_REQUIRED, None, [msg], "bn",
-                cos_alpha=ct.cos_alpha, detail=detail),
-        }
+        return {"bn_without_residual": SaturationResult(0.0, 0.0, ST_GRAPHIC_REQUIRED,
+                                                        None, [f"B(H): {msg}"], "bn",
+                                                        cos_alpha=ct.cos_alpha, detail=detail),
+                "bn_with_residual": SaturationResult(0.0, k_r, ST_GRAPHIC_REQUIRED,
+                                                     None, [f"B(H): {msg}"], "bn",
+                                                     cos_alpha=ct.cos_alpha, detail=detail)}
     b_m = calc_b_m(ct, kz, w2, s)
-    a = b_me / b_m if b_m > 0 else 0.0        # формула (23): A = B_me / B_m
+    a = b_me / b_m if b_m > 0 else 0.0                            # (23)
     det = detail + f", A = {a:.3f}"
     wo = _graphic(ct, kz, 0.0, a, theta_override, "bn", det)
     w = _graphic(ct, kz, k_r, a, theta_override, "bn", det)
@@ -393,14 +407,28 @@ def calculate_bn(ct, kz, bn_data, w2, s, l, theta_override=None, k_r=K_R_PRED,
     return {"bn_without_residual": wo, "bn_with_residual": w}
 
 
+# ---------------------------------------------------------------------------
+# Точка входа
+# ---------------------------------------------------------------------------
+
 def calculate(ct: CTParams, kz: KZParams, method: str = "both",
-              theta_override: Optional[float] = None, k_r: float = K_R_PRED) -> dict:
-    a = calc_a_param(ct, kz)
-    out = {"without_residual": _analytic(ct, kz, 0.0, a),
-           "with_residual": _analytic(ct, kz, k_r, a)}
+              theta_override: Optional[float] = None, k_r: float = K_R_PRED,
+              standard: str = "58669") -> dict:
+    """standard: "58669" (классы P/PX/TPX) или "71879" (5PR/10PR/TPY/TPZ/TPE)."""
+    ct_eff, kz_eff, ts, t_eff = effective_ct_kz(ct, kz, standard)
+    a = calc_a_param(ct_eff, kz_eff)
+    out = {
+        "without_residual": _analytic(ct_eff, kz_eff, 0.0, a),
+        "with_residual": _analytic(ct_eff, kz_eff, k_r, a),
+    }
     if method in ("graphic", "both"):
-        out["graphic_without_residual"] = _graphic(ct, kz, 0.0, a, theta_override)
-        out["graphic_with_residual"] = _graphic(ct, kz, k_r, a, theta_override)
+        out["graphic_without_residual"] = _graphic(ct_eff, kz_eff, 0.0, a, theta_override)
+        out["graphic_with_residual"] = _graphic(ct_eff, kz_eff, k_r, a, theta_override)
+    if standard == "71879" and ts is not None:
+        note = (f"ГОСТ Р 71879-2024: T_s = {ts * 1000:.0f} мс; "
+                f"T = min(T_а.экв, T_s) = {t_eff * 1000:.0f} мс.")
+        for r in out.values():
+            r.notes.insert(0, note)
     return out
 
 
