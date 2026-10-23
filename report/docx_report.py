@@ -1,4 +1,4 @@
-"""Генерация отчёта в формате Word (.docx), включая графики K_п.р(t), ВАХ и B(H)."""
+"""Генерация отчёта в формате Word (.docx), включая графики K_п.р, ВАХ и B(H)."""
 from __future__ import annotations
 
 import io
@@ -13,6 +13,7 @@ from docx.shared import Inches
 from methods.gost_58669 import (
     ANALYTIC_KEYS, GRAPHIC_KEYS, VAH_KEYS, BN_KEYS, K_R_PRED, ST_GRAPHIC_REQUIRED,
     ST_NO_SAT, ST_OK, ST_STEADY, build_kpr_curve, build_vah_default, build_bn_default,
+    calc_b_t,
 )
 
 try:
@@ -52,7 +53,7 @@ def fmt_t(res) -> str:
     if res.status == ST_STEADY:
         return "насыщение в установившемся режиме (A ≤ 1)"
     if res.status == ST_GRAPHIC_REQUIRED:
-        return "аналитический метод неприменим (усл. 8) — см. графический метод"
+        return "метод неприменим — см. примечания"
     return "—"
 
 
@@ -76,26 +77,38 @@ def _keys_for(method: str):
     return ANALYTIC_KEYS
 
 
+def _method_rows(res, keys, name_prefix):
+    """Строки таблицы результатов для заданного набора ключей."""
+    rows = []
+    for key in keys:
+        r = res.get(key)
+        if r is None:
+            continue
+        extra = ""
+        if r.status == ST_OK and r.theta_star is not None:
+            tag = "вручную" if r.theta_manual else "θ*"
+            extra = f", {tag} = {math.degrees(r.theta_star):.1f}°"
+        rows.append((f"{name_prefix} — {SCENARIO_TITLES[key]}", f"{r.a:.4f}",
+                     f"{fmt_t(r)}{extra}"))
+    return rows
+
+
 def _make_chart_png(kz, ct_m, gres, eff) -> io.BytesIO:
-    """Рендер графика K_п.р(t) в PNG для вставки в Word."""
+    """Рендер графика K_п.р(t) в PNG."""
     if not _HAS_MPL:
         raise RuntimeError("matplotlib не установлен")
     import matplotlib.pyplot as plt
-
     if gres.status == ST_OK and gres.t_nas is not None:
         t_nas_ms = gres.t_nas * 1000.0
         t_end = min(max(t_nas_ms * 1.45, 20.0), 400.0)
     else:
         t_nas_ms = None
         t_end = min(max(kz.t_p * 3000.0, 40.0), 400.0)
-
     theta = gres.theta_star if gres.theta_star is not None else 0.0
     t_ms, k_star = build_kpr_curve(kz.t_p, ct_m.alpha, theta, t_end)
     _, k_zero = build_kpr_curve(kz.t_p, ct_m.alpha, 0.0, t_end)
-
     lbl_star = (f"θ = {math.degrees(theta):.1f}° (задано вручную)" if gres.theta_manual
                 else "θ = θ* (расчётный минимум, п. Г.3.7)")
-
     fig, ax = plt.subplots(figsize=(8.0, 4.0))
     ax.plot(t_ms, k_star, color="#d62728", linewidth=2.0, label=lbl_star)
     ax.plot(t_ms, k_zero, color="#1f77b4", linewidth=1.3, label="θ = 0°")
@@ -112,7 +125,6 @@ def _make_chart_png(kz, ct_m, gres, eff) -> io.BytesIO:
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8, loc="best")
     fig.tight_layout()
-
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=150)
     plt.close(fig)
@@ -121,11 +133,10 @@ def _make_chart_png(kz, ct_m, gres, eff) -> io.BytesIO:
 
 
 def _make_vah_png(vah_data, r2) -> io.BytesIO:
-    """Рендер графика ВАХ в PNG для вставки в Word."""
+    """Рендер графика ВАХ в PNG."""
     if not _HAS_MPL:
         raise RuntimeError("matplotlib не установлен")
     import matplotlib.pyplot as plt
-
     vah_plot = build_vah_default(vah_data['u_star'], vah_data['i0_star'], r2)
     fig, ax = plt.subplots(figsize=(8.0, 4.0))
     ax.plot(vah_plot['i0'], vah_plot['u'], color="#d62728", linewidth=2.0)
@@ -139,7 +150,6 @@ def _make_vah_png(vah_data, r2) -> io.BytesIO:
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8, loc="best")
     fig.tight_layout()
-
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=150)
     plt.close(fig)
@@ -148,11 +158,10 @@ def _make_vah_png(vah_data, r2) -> io.BytesIO:
 
 
 def _make_bn_png(bn_data) -> io.BytesIO:
-    """Рендер графика B(H) в PNG для вставки в Word."""
+    """Рендер графика B(H) в PNG."""
     if not _HAS_MPL:
         raise RuntimeError("matplotlib не установлен")
     import matplotlib.pyplot as plt
-
     fig, ax = plt.subplots(figsize=(8.0, 4.0))
     ax.plot(bn_data['h'], bn_data['b'], color="#9467bd", linewidth=2.0)
     ax.axhline(bn_data['b_sat'], color="#2ca02c", linestyle="--", linewidth=1.2,
@@ -163,7 +172,6 @@ def _make_bn_png(bn_data) -> io.BytesIO:
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8, loc="best")
     fig.tight_layout()
-
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=150)
     plt.close(fig)
@@ -173,8 +181,7 @@ def _make_bn_png(bn_data) -> io.BytesIO:
 
 def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="analytic",
                  vah_data=None, bn_data=None, bn_params=None) -> bytes:
-    """ct — паспортные данные ТТ; chain — параметры вторичной цепи;
-    results — список кортежей (CTParams режима, KZParams, dict результатов)."""
+    """results — список кортежей (CTParams режима, KZParams, dict результатов)."""
     doc = Document()
     doc.add_heading("Отчёт о проверке трансформатора тока", 0)
 
@@ -188,16 +195,6 @@ def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="a
         "(п. 4.3, п. 5.1.3). Фактическая вторичная нагрузка определена по параметрам "
         "вторичной цепи в соответствии с п. 4.2.6 и Приложением А."
     )
-    if vah_data:
-        doc.add_paragraph(
-            f"Дополнительно выполнен расчёт по ВАХ (п. 5.3): U* = {vah_data['u_star']:.1f} В, "
-            f"I₀* = {vah_data['i0_star']:.3f} А."
-        )
-    if bn_data:
-        doc.add_paragraph(
-            f"Дополнительно выполнен расчёт по характеристике намагничивания (п. 5.4): "
-            f"Bнас = {bn_data['b_sat']:.2f} Тл, Hколено = {bn_data['h_knee']:.0f} А/м."
-        )
 
     doc.add_heading("1. Исходные данные", level=1)
     _add_table(doc, ["Параметр", "Значение"], [
@@ -218,6 +215,16 @@ def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="a
         ("Требуемое время до насыщения", f"{t_req_ms:g} мс" if t_req_ms else "не задано"),
     ])
 
+    if vah_data:
+        doc.add_paragraph(
+            f"Метод по ВАХ (п. 5.3): U* = {vah_data['u_star']:.1f} В, "
+            f"I₀* = {vah_data['i0_star']:.3f} А.")
+    if bn_data and bn_params:
+        doc.add_paragraph(
+            f"Метод по характеристике намагничивания (п. 5.4): w2 = {bn_params['w2']:g}, "
+            f"s = {bn_params['s'] * 1e4:.1f} см², l = {bn_params['l']:g} м, "
+            f"Bнас = {bn_data['b_sat']:.2f} Тл, Hколено = {bn_data['h_knee']:.0f} А/м.")
+
     doc.add_heading("2. Промежуточные величины (общие)", level=1)
     _add_table(doc, ["Величина", "Значение"], [
         ("Сопротивление номинальной нагрузки zн.ном = Sном / I2ном²", f"{ct.z_n_nom:.4f} Ом"),
@@ -230,70 +237,48 @@ def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="a
     for idx, (ct_m, kz, res) in enumerate(results, start=3):
         r_cable = ct_m.r_load_fact - chain["r_prib"] - chain["r_per"]
         doc.add_heading(f"{idx}. Режим: {kz.label}", level=1)
-
-        mode_params = [
+        _add_table(doc, ["Параметр", "Значение"], [
             ("Ток КЗ (действующее значение)", f"{kz.i_kz:g} А"),
             ("Постоянная времени T_p", f"{kz.t_p:g} с ({kz.t_p * 1000:.0f} мс)"),
             ("Фактическая кратность Kфакт = Iкз / I1ном", f"{kz.i_kz / ct_m.i1_nom:.2f}"),
             ("R кабеля для этого режима (ρ·k·L/S)", f"{r_cable:.4f} Ом"),
             ("Rн.факт = Rприб + Rпер + Rкаб", f"{ct_m.r_load_fact:.4f} Ом"),
             ("z2Σ (формула 11)", f"{ct_m.z2_sigma:.4f} Ом"),
-            ("Угол α (формула 12)", f"{math.degrees(ct_m.alpha):.2f}° (cos α = {ct_m.cos_alpha:.4f})"),
+            ("Угол α (формула 12)",
+             f"{math.degrees(ct_m.alpha):.2f}° (cos α = {ct_m.cos_alpha:.4f})"),
             ("Параметр режима A (формула 9)", f"{res[keys[0]].a:.4f}"),
-        ]
-        _add_table(doc, ["Параметр", "Значение"], mode_params)
+        ])
 
-        rows = []
-        for key in keys:
-            r = res.get(key)
-            if r is None:
-                continue
-            m_name = "графический" if key in GRAPHIC_KEYS else "аналитический"
-            extra = ""
-            if key in GRAPHIC_KEYS and r.status == ST_OK and r.theta_star is not None:
-                tag = "вручную" if r.theta_manual else "θ*"
-                extra = f", {tag} = {math.degrees(r.theta_star):.1f}°"
-            rows.append((f"{m_name} — {SCENARIO_TITLES[key]}", f"{r.a:.4f}",
-                         f"{fmt_t(r)}{extra}"))
+        # Основная таблица (аналитический + графический по паспортным данным)
+        rows = _method_rows(res, keys, "аналитический" if method == "analytic" else "")
+        if method == "both":
+            rows = _method_rows(res, ANALYTIC_KEYS, "аналитический") + \
+                   _method_rows(res, GRAPHIC_KEYS, "графический")
         _add_table(doc, ["Метод и сценарий", "Параметр A", "Время до насыщения"], rows)
 
         # Метод по ВАХ
         if vah_data and VAH_KEYS[0] in res:
-            vah_rows = []
-            for key in VAH_KEYS:
-                r = res.get(key)
-                if r is None:
-                    continue
-                extra = ""
-                if r.status == ST_OK and r.theta_star is not None:
-                    tag = "вручную" if r.theta_manual else "θ*"
-                    extra = f", {tag} = {math.degrees(r.theta_star):.1f}°"
-                vah_rows.append((f"по ВАХ — {SCENARIO_TITLES[key]}", f"{r.a:.4f}",
-                                 f"{fmt_t(r)}{extra}"))
-            if vah_rows:
-                doc.add_paragraph("Результаты по ВАХ (п. 5.3):").bold = True
-                _add_table(doc, ["Метод и сценарий", "Параметр A", "Время до насыщения"], vah_rows)
+            doc.add_paragraph("Результаты по ВАХ (п. 5.3):").bold = True
+            _add_table(doc, ["Метод и сценарий", "Параметр A", "Время до насыщения"],
+                       _method_rows(res, VAH_KEYS, "по ВАХ"))
 
         # Метод по характеристике намагничивания
         if bn_data and BN_KEYS[0] in res:
-            bn_rows = []
-            for key in BN_KEYS:
-                r = res.get(key)
-                if r is None:
-                    continue
-                extra = ""
-                if r.status == ST_OK and r.theta_star is not None:
-                    tag = "вручную" if r.theta_manual else "θ*"
-                    extra = f", {tag} = {math.degrees(r.theta_star):.1f}°"
-                bn_rows.append((f"по B(H) — {SCENARIO_TITLES[key]}", f"{r.a:.4f}",
-                                f"{fmt_t(r)}{extra}"))
-            if bn_rows:
-                doc.add_paragraph("Результаты по характеристике намагничивания (п. 5.4):").bold = True
-                _add_table(doc, ["Метод и сценарий", "Параметр A", "Время до насыщения"], bn_rows)
+            b_t = calc_b_t(ct_m, kz, bn_params['w2'], bn_params['s'])
+            doc.add_paragraph(
+                f"Результаты по характеристике намагничивания (п. 5.4), "
+                f"Bт = {b_t:.3f} Тл:").bold = True
+            _add_table(doc, ["Метод и сценарий", "Параметр A", "Время до насыщения"],
+                       _method_rows(res, BN_KEYS, "по B(H)"))
 
-        # Примечания
+        # Примечания (с защитой от дублей по тексту)
         seen = set()
-        for key in keys:
+        all_keys = list(keys)
+        if vah_data and VAH_KEYS[0] in res:
+            all_keys += list(VAH_KEYS)
+        if bn_data and BN_KEYS[0] in res:
+            all_keys += list(BN_KEYS)
+        for key in all_keys:
             r = res.get(key)
             if r is None:
                 continue
@@ -301,26 +286,8 @@ def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="a
                 if note not in seen:
                     seen.add(note)
                     doc.add_paragraph(note, style="List Bullet")
-        if vah_data:
-            for key in VAH_KEYS:
-                r = res.get(key)
-                if r is None:
-                    continue
-                for note in r.notes:
-                    if note not in seen:
-                        seen.add(note)
-                        doc.add_paragraph(note, style="List Bullet")
-        if bn_data:
-            for key in BN_KEYS:
-                r = res.get(key)
-                if r is None:
-                    continue
-                for note in r.notes:
-                    if note not in seen:
-                        seen.add(note)
-                        doc.add_paragraph(note, style="List Bullet")
 
-        # Графики K_п.р(t) для графического метода
+        # Графики K_п.р для графического метода
         if method in ("graphic", "both"):
             for key in GRAPHIC_KEYS:
                 r = res.get(key)
@@ -328,32 +295,29 @@ def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="a
                     continue
                 eff = r.a * (1.0 - r.k_r)
                 cap = doc.add_paragraph()
-                cap.add_run(f"График K_п.р(t) — {SCENARIO_TITLES[key]}:").bold = True
+                cap.add_run(f"График K_п.р(t) — {SCENARIO_TITLES[key]} "
+                            f"(θ* = {math.degrees(r.theta_star):.1f}°):").bold = True
                 try:
-                    png = _make_chart_png(kz, ct_m, r, eff)
-                    doc.add_picture(png, width=Inches(6.0))
+                    doc.add_picture(_make_chart_png(kz, ct_m, r, eff), width=Inches(6.0))
                 except Exception as exc:
                     doc.add_paragraph(f"(График не построен: {type(exc).__name__}.)")
 
-        # График ВАХ
-        if vah_data and VAH_KEYS[0] in res:
-            cap = doc.add_paragraph()
-            cap.add_run("График ВАХ (п. 5.3):").bold = True
-            try:
-                png = _make_vah_png(vah_data, ct_m.r2)
-                doc.add_picture(png, width=Inches(6.0))
-            except Exception as exc:
-                doc.add_paragraph(f"(График ВАХ не построен: {type(exc).__name__}.)")
+    # Кривые ВАХ и B(H) — один раз на отчёт
+    if vah_data:
+        cap = doc.add_paragraph()
+        cap.add_run("Вольт-амперная характеристика ТТ (типовая):").bold = True
+        try:
+            doc.add_picture(_make_vah_png(vah_data, ct.r2), width=Inches(6.0))
+        except Exception as exc:
+            doc.add_paragraph(f"(График ВАХ не построен: {type(exc).__name__}.)")
 
-        # График B(H)
-        if bn_data and BN_KEYS[0] in res:
-            cap = doc.add_paragraph()
-            cap.add_run("Характеристика намагничивания B(H) (п. 5.4):").bold = True
-            try:
-                png = _make_bn_png(bn_data)
-                doc.add_picture(png, width=Inches(6.0))
-            except Exception as exc:
-                doc.add_paragraph(f"(График B(H) не построен: {type(exc).__name__}.)")
+    if bn_data:
+        cap = doc.add_paragraph()
+        cap.add_run("Характеристика намагничивания B(H) (типовая):").bold = True
+        try:
+            doc.add_picture(_make_bn_png(bn_data), width=Inches(6.0))
+        except Exception as exc:
+            doc.add_paragraph(f"(График B(H) не построен: {type(exc).__name__}.)")
 
     doc.add_heading("Вывод", level=1)
     label = {"success": "ТТ проходит проверку.",
