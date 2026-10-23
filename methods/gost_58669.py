@@ -430,6 +430,47 @@ def calculate(ct: CTParams, kz: KZParams, method: str = "both",
         for r in out.values():
             r.notes.insert(0, note)
     return out
+# ---------------------------------------------------------------------------
+# ВТОРОЕ КЗ (НЕУСПЕШНОЕ АПВ) — ГОСТ Р 71879-2024, п. 5.1.6, формула (9)
+# ---------------------------------------------------------------------------
 
+SECOND_KZ_KEYS = ("second_without_residual", "second_with_residual")
+
+
+def t_nas_second_kz_71879(a, T, Ts, t_bp, k_r):
+    """Время до насыщения при втором КЗ, формула (9).
+
+    a — параметр режима (4); T = min(Tа.экв, Ts); Ts — фактическая постоянная
+    времени вторичного контура (5); t_bp — бестоковая пауза (t2 − tкз1);
+    k_r — коэффициент остаточной намагниченности.
+    Возвращает (t_нас [с] или None, статус)."""
+    if Ts <= 0 or T <= 0:
+        return None, ST_NO_SAT
+    residual = a * math.exp(-t_bp / Ts)          # затухший остаток от первого КЗ
+    effective_2 = a * (1.0 - k_r) - residual
+    if effective_2 <= 1.0:                       # условие (11)
+        return None, ST_GRAPHIC_REQUIRED
+    denom = OMEGA * T + 1.0 - effective_2        # условие (10)
+    if denom <= 0.0:
+        return None, ST_NO_SAT
+    return T * math.log((OMEGA * T) / denom), ST_OK
+
+
+def calculate_second_kz_71879(ct, kz, k_r, t_bp):
+    """Второе КЗ (АПВ) для обоих сценариев остаточной намагниченности."""
+    ct_eff, kz_eff, ts, t_eff = effective_ct_kz(ct, kz, "71879")
+    a = calc_a_param(ct_eff, kz_eff)
+    out = {}
+    for key, kr in (("second_without_residual", 0.0),
+                    ("second_with_residual", k_r)):
+        t, status = t_nas_second_kz_71879(a, t_eff, ts, t_bp, kr)
+        notes = [f"Второе КЗ (АПВ): A = {a:.3f}, T_s = {ts * 1000:.0f} мс, "
+                 f"t_б.п = {t_bp * 1000:.0f} мс."]
+        out[key] = SaturationResult(a, kr, status, t, notes, "second_kz",
+                                    cos_alpha=ct_eff.cos_alpha)
+    return out
+
+
+# === КОНЕЦ ФАЙЛА methods/gost_58669.py ===
 
 # === КОНЕЦ ФАЙЛА methods/gost_58669.py ===
