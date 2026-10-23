@@ -9,7 +9,11 @@ try:
     from methods.gost_58669 import (
         ANALYTIC_KEYS, CTParams, GRAPHIC_KEYS, K_R_PRED, K_R_PR_DEFAULT, KZParams,
         ST_NO_SAT, ST_OK, ST_STEADY, VAH_KEYS, BN_KEYS, build_kpr_curve, calculate,
-        build_vah_default, build_bn_default, calculate_vah, calculate_bn,
+        btry:
+    from methods.gost_58669 import (
+        ANALYTIC_KEYS, CTParams, GRAPHIC_KEYS, K_R_PRED, K_R_PR_DEFAULT, KZParams,
+        OMEGA, ST_NO_SAT, ST_OK, ST_STEADY, VAH_KEYS, BN_KEYS, build_kpr_curve,
+        calculate, build_vah_default, build_bn_default, calculate_vah, calculate_bn,
         validate_bn_inputs, validate_bn_usage, effective_ct_kz, ts_fact_71879,
     )
     from methods.curve_io import (
@@ -93,15 +97,17 @@ with st.sidebar:
     std_code = "71879" if is_71879 else "58669"
     ct_class = None
     l2 = ts_nom = kp_r_nom = 0.0
-    if is_71879:
+        if is_71879:
         ct_class = st.selectbox("Класс точности", PR_CLASSES)
         l2 = st.number_input("L2 — индуктивность рассеяния, Гн", min_value=0.0,
-                             max_value=1.0, value=0.0018, step=0.0001, format="%.4f",
+                             max_value=1.0, value=0.00182, step=0.00001,
+                             format="%.6f",
                              help="Из паспорта/заводских данных. В примере Б.1 "
                                   "ГОСТ Р 71879-2024: L2 = 0,00182 Гн.")
         ts_nom = st.number_input("Ts.ном — постоянная времени контура, с",
-                                 min_value=0.01, max_value=10.0, value=0.5,
-                                 step=0.05, format="%.3f")
+                                 min_value=0.01, max_value=10.0, value=0.507,
+                                 step=0.001, format="%.3f",
+                                 help="В примере Б.1 ГОСТ Р 71879-2024: Ts.ном = 0,507 с.")
         kp_r_nom = st.number_input(
             "Kп.р.ном — коэфф. переходного режима", min_value=1.0, max_value=100.0,
             value=1.0 if ct_class in ("5PR", "10PR") else 10.0, step=1.0,
