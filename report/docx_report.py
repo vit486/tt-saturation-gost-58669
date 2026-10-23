@@ -31,16 +31,22 @@ METHOD_TITLES = {
     "both": "аналитический и графический методы (разделы 5.1 и 5.2)",
 }
 
-SCENARIO_TITLES = {
-    "without_residual": "без остаточной намагниченности (K_r = 0)",
-    "with_residual": f"с предельной остаточной намагниченностью (K_r = {K_R_PRED})",
-    "graphic_without_residual": "без остаточной намагниченности (K_r = 0)",
-    "graphic_with_residual": f"с предельной остаточной намагниченностью (K_r = {K_R_PRED})",
-    "vah_without_residual": "без остаточной намагниченности (K_r = 0)",
-    "vah_with_residual": f"с предельной остаточной намагниченностью (K_r = {K_R_PRED})",
-    "bn_without_residual": "без остаточной намагниченности (K_r = 0)",
-    "bn_with_residual": f"с предельной остаточной намагниченностью (K_r = {K_R_PRED})",
-}
+
+def _scenario_title(key, k_r):
+    """Название сценария с актуальным значением K_r."""
+    prefix = {
+        "without_residual": "аналитический",
+        "with_residual": "аналитический",
+        "graphic_without_residual": "графический",
+        "graphic_with_residual": "графический",
+        "vah_without_residual": "по ВАХ",
+        "vah_with_residual": "по ВАХ",
+        "bn_without_residual": "по B(H)",
+        "bn_with_residual": "по B(H)",
+    }.get(key, key)
+    suffix = ("без остаточной намагниченности (K_r = 0)" if "without" in key
+              else f"с остаточной намагниченностью (K_r = {k_r:g})")
+    return f"{prefix} — {suffix}"
 
 
 def fmt_t(res) -> str:
@@ -77,8 +83,7 @@ def _keys_for(method: str):
     return ANALYTIC_KEYS
 
 
-def _method_rows(res, keys, name_prefix):
-    """Строки таблицы результатов для заданного набора ключей."""
+def _method_rows(res, keys, k_r, name_prefix):
     rows = []
     for key in keys:
         r = res.get(key)
@@ -88,13 +93,12 @@ def _method_rows(res, keys, name_prefix):
         if r.status == ST_OK and r.theta_star is not None:
             tag = "вручную" if r.theta_manual else "θ*"
             extra = f", {tag} = {math.degrees(r.theta_star):.1f}°"
-        rows.append((f"{name_prefix} — {SCENARIO_TITLES[key]}", f"{r.a:.4f}",
-                     f"{fmt_t(r)}{extra}"))
+        rows.append((f"{name_prefix} — {_scenario_title(key, k_r).split(' — ')[-1]}",
+                     f"{r.a:.4f}", f"{fmt_t(r)}{extra}"))
     return rows
 
 
 def _make_chart_png(kz, ct_m, gres, eff) -> io.BytesIO:
-    """Рендер графика K_п.р(t) в PNG."""
     if not _HAS_MPL:
         raise RuntimeError("matplotlib не установлен")
     import matplotlib.pyplot as plt
@@ -133,7 +137,6 @@ def _make_chart_png(kz, ct_m, gres, eff) -> io.BytesIO:
 
 
 def _make_vah_png(vah_data, r2) -> io.BytesIO:
-    """Рендер графика ВАХ в PNG."""
     if not _HAS_MPL:
         raise RuntimeError("matplotlib не установлен")
     import matplotlib.pyplot as plt
@@ -158,7 +161,6 @@ def _make_vah_png(vah_data, r2) -> io.BytesIO:
 
 
 def _make_bn_png(bn_data) -> io.BytesIO:
-    """Рендер графика B(H) в PNG."""
     if not _HAS_MPL:
         raise RuntimeError("matplotlib не установлен")
     import matplotlib.pyplot as plt
@@ -166,6 +168,8 @@ def _make_bn_png(bn_data) -> io.BytesIO:
     ax.plot(bn_data['h'], bn_data['b'], color="#9467bd", linewidth=2.0)
     ax.axhline(bn_data['b_sat'], color="#2ca02c", linestyle="--", linewidth=1.2,
                label=f"Bнас = {bn_data['b_sat']:.2f} Тл")
+    ax.axvline(bn_data['h_knee'], color="#ff7f0e", linestyle=":", linewidth=1.2,
+               label=f"Hколено = {bn_data['h_knee']:.0f} А/м")
     ax.set_xlabel("Напряжённость магнитного поля H, А/м")
     ax.set_ylabel("Магнитная индукция B, Тл")
     ax.set_title("Характеристика намагничивания B(H) (типовая)", fontsize=10)
@@ -180,7 +184,7 @@ def _make_bn_png(bn_data) -> io.BytesIO:
 
 
 def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="analytic",
-                 vah_data=None, bn_data=None, bn_params=None) -> bytes:
+                 vah_data=None, bn_data=None, bn_params=None, k_r=K_R_PRED) -> bytes:
     """results — список кортежей (CTParams режима, KZParams, dict результатов)."""
     doc = Document()
     doc.add_heading("Отчёт о проверке трансформатора тока", 0)
@@ -191,9 +195,9 @@ def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="a
     doc.add_paragraph(
         "Определение времени до насыщения при коротких замыканиях по ГОСТ Р 58669-2019, "
         f"{METHOD_TITLES.get(method, method)}. Расчёт выполнен без остаточной "
-        f"намагниченности и с предельной остаточной намагниченностью K_r = {K_R_PRED} "
-        "(п. 4.3, п. 5.1.3). Фактическая вторичная нагрузка определена по параметрам "
-        "вторичной цепи в соответствии с п. 4.2.6 и Приложением А."
+        f"намагниченности и с остаточной намагниченностью K_r = {k_r:g} "
+        "(п. 4.3). Фактическая вторичная нагрузка определена по параметрам вторичной цепи "
+        "в соответствии с п. 4.2.6 и Приложением А."
     )
 
     doc.add_heading("1. Исходные данные", level=1)
@@ -212,6 +216,7 @@ def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="a
         ("Длина кабеля (в одну сторону)", f"{chain['length']:g} м"),
         ("Сечение жилы", f"{chain['section']:g} мм²"),
         ("Переходное сопротивление контактов", f"{chain['r_per']:g} Ом"),
+        ("Коэффициент остаточной намагниченности K_r", f"{k_r:g}"),
         ("Требуемое время до насыщения", f"{t_req_ms:g} мс" if t_req_ms else "не задано"),
     ])
 
@@ -249,29 +254,27 @@ def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="a
             ("Параметр режима A (формула 9)", f"{res[keys[0]].a:.4f}"),
         ])
 
-        # Основная таблица (аналитический + графический по паспортным данным)
-        rows = _method_rows(res, keys, "аналитический" if method == "analytic" else "")
         if method == "both":
-            rows = _method_rows(res, ANALYTIC_KEYS, "аналитический") + \
-                   _method_rows(res, GRAPHIC_KEYS, "графический")
+            rows = _method_rows(res, ANALYTIC_KEYS, k_r, "аналитический") + \
+                   _method_rows(res, GRAPHIC_KEYS, k_r, "графический")
+        else:
+            rows = _method_rows(res, keys, k_r,
+                                "аналитический" if method == "analytic" else "графический")
         _add_table(doc, ["Метод и сценарий", "Параметр A", "Время до насыщения"], rows)
 
-        # Метод по ВАХ
         if vah_data and VAH_KEYS[0] in res:
             doc.add_paragraph("Результаты по ВАХ (п. 5.3):").bold = True
             _add_table(doc, ["Метод и сценарий", "Параметр A", "Время до насыщения"],
-                       _method_rows(res, VAH_KEYS, "по ВАХ"))
+                       _method_rows(res, VAH_KEYS, k_r, "по ВАХ"))
 
-        # Метод по характеристике намагничивания
         if bn_data and BN_KEYS[0] in res:
             b_t = calc_b_t(ct_m, kz, bn_params['w2'], bn_params['s'])
             doc.add_paragraph(
                 f"Результаты по характеристике намагничивания (п. 5.4), "
                 f"Bт = {b_t:.3f} Тл:").bold = True
             _add_table(doc, ["Метод и сценарий", "Параметр A", "Время до насыщения"],
-                       _method_rows(res, BN_KEYS, "по B(H)"))
+                       _method_rows(res, BN_KEYS, k_r, "по B(H)"))
 
-        # Примечания (с защитой от дублей по тексту)
         seen = set()
         all_keys = list(keys)
         if vah_data and VAH_KEYS[0] in res:
@@ -287,7 +290,6 @@ def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="a
                     seen.add(note)
                     doc.add_paragraph(note, style="List Bullet")
 
-        # Графики K_п.р для графического метода
         if method in ("graphic", "both"):
             for key in GRAPHIC_KEYS:
                 r = res.get(key)
@@ -295,14 +297,13 @@ def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="a
                     continue
                 eff = r.a * (1.0 - r.k_r)
                 cap = doc.add_paragraph()
-                cap.add_run(f"График K_п.р(t) — {SCENARIO_TITLES[key]} "
+                cap.add_run(f"График K_п.р(t) — {_scenario_title(key, k_r).split(' — ')[-1]} "
                             f"(θ* = {math.degrees(r.theta_star):.1f}°):").bold = True
                 try:
                     doc.add_picture(_make_chart_png(kz, ct_m, r, eff), width=Inches(6.0))
                 except Exception as exc:
                     doc.add_paragraph(f"(График не построен: {type(exc).__name__}.)")
 
-    # Кривые ВАХ и B(H) — один раз на отчёт
     if vah_data:
         cap = doc.add_paragraph()
         cap.add_run("Вольт-амперная характеристика ТТ (типовая):").bold = True
