@@ -1,6 +1,5 @@
-"""⚡ Проверка ТТ на насыщение при КЗ. ГОСТ Р 58669-2019. Релиз 2.0.
-Добавлена вкладка «Характеристики»: ввод ВАХ и B(H) из файла (CSV/Excel),
-вручную или типовая кривая."""
+"""⚡ Проверка ТТ на насыщение при КЗ. ГОСТ Р 58669-2019 и ГОСТ Р 71879-2024.
+Релиз 2.1."""
 import math
 from datetime import datetime
 
@@ -8,16 +7,17 @@ import streamlit as st
 
 try:
     from methods.gost_58669 import (
-        ANALYTIC_KEYS, CTParams, GRAPHIC_KEYS, K_R_PRED, KZParams,
-        ST_NO_SAT, ST_OK, ST_STEADY, VAH_KEYS, BN_KEYS, build_kpr_curve,
-        calculate, build_vah_default, build_bn_default,
-        calculate_vah, calculate_bn, validate_bn_inputs, validate_bn_usage,
+        ANALYTIC_KEYS, CTParams, GRAPHIC_KEYS, K_R_PRED, K_R_PR_DEFAULT, KZParams,
+        ST_NO_SAT, ST_OK, ST_STEADY, VAH_KEYS, BN_KEYS, build_kpr_curve, calculate,
+        build_vah_default, build_bn_default, calculate_vah, calculate_bn,
+        validate_bn_inputs, validate_bn_usage, effective_ct_kz, ts_fact_71879,
     )
     from methods.curve_io import (
         read_uploaded_curve, curve_from_dataframe, VAH_TEMPLATE, BN_TEMPLATE,
     )
     from methods.reference_examples import (
-        REFERENCE_EXAMPLES, run_graphic_checks, run_method_comparison, run_self_checks,
+        REFERENCE_EXAMPLES, run_graphic_checks, run_method_comparison,
+        run_self_checks, run_self_checks_71879,
     )
     from methods.summary import build_summary
     from report.docx_report import build_report
@@ -28,17 +28,17 @@ except Exception as e:
 if _ERR is not None:
     st.set_page_config(page_title="Ошибка структуры файлов")
     st.error(f"Не загружены модули: {type(_ERR).__name__}: {_ERR}")
-    st.markdown("Проверьте файлы: `methods/gost_58669.py`, `methods/summary.py`, "
-                "`methods/curve_io.py`, `methods/reference_examples.py`, "
-                "`report/docx_report.py`.")
+    st.markdown("Проверьте файлы: `methods/gost_58669.py` (`def effective_ct_kz(`), "
+                "`methods/reference_examples.py` (`def run_self_checks_71879(`), "
+                "`methods/curve_io.py`, `methods/summary.py`, `report/docx_report.py`.")
     st.stop()
 
 import numpy as np   # noqa: E402
 import pandas as pd  # noqa: E402
 
-st.set_page_config(page_title="Проверка ТТ — ГОСТ Р 58669-2019", layout="wide", page_icon="⚡")
+st.set_page_config(page_title="Проверка ТТ — ГОСТ Р 58669/71879", layout="wide", page_icon="⚡")
 st.title("⚡ Проверка трансформаторов тока")
-st.caption("ГОСТ Р 58669-2019 · каскад: аналитический → графический → ВАХ → B(H) · релиз 2.0")
+st.caption("ГОСТ Р 58669-2019 · ГОСТ Р 71879-2024 · каскад методов · релиз 2.1")
 
 LBL_STAR = "θ = θ* — расчётный минимум (п. Г.3.7)"
 LBL_ZERO = "θ = 0° — максимум апериодической составляющей"
@@ -50,7 +50,6 @@ SCHEME_FACTORS = {
     "Один ТТ (2 провода)": (2.0, 2.0),
 }
 RHO = {"Медь": 0.0175, "Алюминий": 0.0281}
-
 PRESETS = {
     "— ввести вручную —": {},
     "ТОЛ-10 600/5 10P10 15 ВА": dict(i1_nom=600., i2_nom=5., k_nom=10., s_nom=15.,
@@ -58,13 +57,15 @@ PRESETS = {
     "ТФЗМ-110 2000/5 10P20 30 ВА": dict(i1_nom=2000., i2_nom=5., k_nom=20., s_nom=30.,
                                         r2=.45, r_prib=.8),
 }
-
 PRIMARY_NAMES = {
     "analytic": "аналитический (п. 5.1)",
     "graphic": "графический по паспортным данным (п. 5.2)",
     "vah": "по ВАХ (п. 5.3)",
     "bn": "по характеристике намагничивания (п. 5.4)",
 }
+STANDARD_OPTIONS = ["ГОСТ Р 58669-2019 — классы P, PX, TPX",
+                    "ГОСТ Р 71879-2024 — классы 5PR, 10PR, TPY, TPZ, TPE"]
+PR_CLASSES = ["5PR", "10PR", "TPY", "TPZ", "TPE"]
 
 
 def make_scenario_title(key, k_r):
@@ -81,10 +82,30 @@ def make_scenario_title(key, k_r):
 
 
 # ---------------------------------------------------------------------------
-# Боковая панель (без ВАХ и B(H) — они переехали во вкладку «Характеристики»)
+# Боковая панель
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.header("⚙️ Исходные данные")
+
+    st.subheader("Стандарт и класс ТТ")
+    standard_name = st.radio("Стандарт", STANDARD_OPTIONS, key="std")
+    is_71879 = standard_name.startswith("ГОСТ Р 71879")
+    std_code = "71879" if is_71879 else "58669"
+    ct_class = None
+    l2 = ts_nom = kp_r_nom = 0.0
+    if is_71879:
+        ct_class = st.selectbox("Класс точности", PR_CLASSES)
+        l2 = st.number_input("L2 — индуктивность рассеяния, Гн", min_value=0.0,
+                             max_value=1.0, value=0.0018, step=0.0001, format="%.4f",
+                             help="Из паспорта/заводских данных. В примере Б.1 "
+                                  "ГОСТ Р 71879-2024: L2 = 0,00182 Гн.")
+        ts_nom = st.number_input("Ts.ном — постоянная времени контура, с",
+                                 min_value=0.01, max_value=10.0, value=0.5,
+                                 step=0.05, format="%.3f")
+        kp_r_nom = st.number_input(
+            "Kп.р.ном — коэфф. переходного режима", min_value=1.0, max_value=100.0,
+            value=1.0 if ct_class in ("5PR", "10PR") else 10.0, step=1.0,
+            help="Для 5PR/10PR принимается равным 1; для TPY/TPZ/TPE — по паспорту.")
 
     st.subheader("Начальная фаза θ")
     manual_theta = st.checkbox("Задать θ вручную", value=False)
@@ -95,14 +116,17 @@ with st.sidebar:
         theta_override = math.radians(theta_deg)
 
     st.subheader("Остаточная намагниченность")
-    custom_kr = st.checkbox("Задать K_r вручную", value=False,
-                            help="По умолчанию 0,86 (класс P, п. 5.1.3). Для 5PR/10PR "
-                                 "и по заводским данным — например 0,1.")
+    k_r_default = K_R_PR_DEFAULT if is_71879 else K_R_PRED
+    custom_kr = st.checkbox(
+        "Задать K_r вручную", value=False,
+        help=f"По умолчанию: {K_R_PRED} для классов по ГОСТ Р 58669-2019 (п. 5.1.3); "
+             f"{K_R_PR_DEFAULT} для 5PR/10PR/TPY/TPZ без паспортных данных "
+             "(ГОСТ Р 70507.2-2024). В примере Б.1 — 0,085 по паспорту.")
     if custom_kr:
-        k_r = st.number_input("K_r", min_value=0.0, max_value=1.0, value=0.86,
-                              step=0.01, format="%.2f")
+        k_r = st.number_input("K_r", min_value=0.0, max_value=1.0,
+                              value=k_r_default, step=0.01, format="%.3f")
     else:
-        k_r = K_R_PRED
+        k_r = k_r_default
 
     pn = st.selectbox("Тип ТТ", list(PRESETS.keys()))
     pr = PRESETS[pn]
@@ -139,22 +163,19 @@ with st.sidebar:
 
     st.subheader("Короткое замыкание")
     i_kz3 = st.number_input("Iкз(3), А", min_value=1.0, value=15000.0, step=100.0)
-    t_p3 = st.number_input("Tр(3), с", min_value=0.001, value=0.05, step=0.005,
-                           format="%.3f")
+    t_p3 = st.number_input("Tр(3) = Tа.экв, с", min_value=0.001, value=0.05,
+                           step=0.005, format="%.3f")
     use_kz1 = st.checkbox("Расчёт для однофазного КЗ")
     i_kz1 = t_p1 = None
     if use_kz1:
         i_kz1 = st.number_input("Iкз(1), А", min_value=1.0, value=12000.0, step=100.0)
-        t_p1 = st.number_input("Tр(1), с", min_value=0.001, value=0.05, step=0.005,
-                               format="%.3f")
+        t_p1 = st.number_input("Tр(1) = Tа.экв, с", min_value=0.001, value=0.05,
+                               step=0.005, format="%.3f")
     t_req = st.number_input("Требуемое t_нас, мс (0 — не проверять)",
                             min_value=0.0, max_value=500.0, value=0.0, step=5.0)
 
-    st.caption("ВАХ и характеристика намагничивания задаются во вкладке «📋 Характеристики».")
-
-
 # ---------------------------------------------------------------------------
-# Вспомогательные функции отображения
+# Вспомогательные функции
 # ---------------------------------------------------------------------------
 def fmt_t(r):
     if r is None:
@@ -217,13 +238,12 @@ def chart_kpr(ct_m, kz, r, eff):
 
 
 # ---------------------------------------------------------------------------
-# Вкладки. «Характеристики» выполняется ПЕРВЫМ, чтобы данные попали в расчёт.
+# Вкладки; «Характеристики» выполняется первой — её данные нужны расчёту
 # ---------------------------------------------------------------------------
 tab_res, tab_chars, tab_check, tab_theory, tab_about = st.tabs([
     "🧮 Результаты", "📋 Характеристики", "🧪 Самопроверка",
     "📚 Теория", "ℹ️ О приложении"])
 
-# Значения по умолчанию (переопределяются во вкладке «Характеристики»)
 eps = 10.0
 use_vah = False
 vah_table = None
@@ -239,12 +259,11 @@ bn_input_msg = ""
 with tab_chars:
     st.markdown("### Уточняющие характеристики ТТ")
     st.caption("Используются методами по ВАХ (п. 5.3) и по характеристике намагничивания "
-               "(п. 5.4). Источники: типовая кривая, файл CSV/Excel или ручной ввод. "
-               "Минимум 5 точек, от нуля до насыщения.")
-    eps = st.selectbox("Полная погрешность ε, % (класс защиты)", (10.0, 5.0), 0,
-                       help="Для формулы (17): I0ε = (ε/100)·I2ном·Kфакт.")
+               "(п. 5.4). Источники: типовая кривая, файл CSV/Excel или ручной ввод.")
+    eps_idx = 1 if (is_71879 and ct_class == "5PR") else 0
+    eps = st.selectbox("Полная погрешность ε, % (класс защиты)", (10.0, 5.0), eps_idx,
+                       help="10 % для 10P/10PR; 5 % для 5P/5PR. Формула (17).")
 
-    # ---------------- ВАХ ----------------
     st.markdown("#### Вольт-амперная характеристика — ВАХ (п. 5.3)")
     use_vah = st.checkbox("Использовать метод по ВАХ", value=False, key="use_vah")
     if use_vah:
@@ -271,12 +290,12 @@ with tab_chars:
                         src_df = read_uploaded_curve(up)
                     except Exception as e:
                         st.error(f"Не удалось прочитать файл: {e}")
-            else:  # Ввод вручную
+            else:
                 init = pd.DataFrame({"I0, А": [0.01, 0.05, 0.10, 0.30, 0.60, 1.20],
                                      "U, В": [5.0, 24.0, 47.0, 98.0, 120.0, 132.0]})
                 src_df = st.data_editor(init, num_rows="dynamic", key="vah_manual")
-                st.caption("Редактируйте таблицу: строки можно добавлять/удалять. "
-                           "Первая колонка — I₀ (А), вторая — U (В).")
+                st.caption("Первая колонка — I₀ (А), вторая — U (В). Строки можно "
+                           "добавлять/удалять.")
             if src_df is not None and len(src_df):
                 try:
                     ok, warns, xs, ys = curve_from_dataframe(src_df)
@@ -295,7 +314,6 @@ with tab_chars:
             chart_generic(vah_curve_final["i0"], vah_curve_final["u"],
                           "I₀, А", "U, В", "ВАХ ТТ", "#d62728")
 
-    # ---------------- B(H) ----------------
     st.markdown("#### Характеристика намагничивания B(H) (п. 5.4)")
     use_bn = st.checkbox("Использовать метод по B(H)", value=False, key="use_bn")
     if use_bn:
@@ -327,11 +345,11 @@ with tab_chars:
                         src_df = read_uploaded_curve(up)
                     except Exception as e:
                         st.error(f"Не удалось прочитать файл: {e}")
-            else:  # Ввод вручную
+            else:
                 init = pd.DataFrame({"H, А/м": [10., 30., 60., 100., 200., 500.],
                                      "B, Тл": [0.18, 0.54, 1.05, 1.62, 1.76, 1.79]})
                 src_df = st.data_editor(init, num_rows="dynamic", key="bn_manual")
-                st.caption("Редактируйте таблицу: первая колонка — H (А/м), вторая — B (Тл).")
+                st.caption("Первая колонка — H (А/м), вторая — B (Тл).")
             if src_df is not None and len(src_df):
                 try:
                     ok, warns, xs, ys = curve_from_dataframe(src_df)
@@ -366,13 +384,19 @@ r_n1 = r_prib + r_per + rho * cable_len * k_sch_1 / cable_s
 
 chain = {"scheme": scheme, "material": f"{mat} (ρ = {rho} Ом·мм²/м, 20 °С)",
          "length": cable_len, "section": cable_s, "r_prib": r_prib, "r_per": r_per,
-         "x_load": x_load, "k_sch_3": k_sch_3, "k_sch_1": k_sch_1}
+         "x_load": x_load, "k_sch_3": k_sch_3, "k_sch_1": k_sch_1,
+         "standard": standard_name}
+if is_71879:
+    chain.update({"ct_class": ct_class, "l2": l2, "ts_nom": ts_nom,
+                  "kp_r_nom": kp_r_nom})
 
-ct3 = CTParams(i1_nom, i2_nom, k_nom, s_nom, cos_phi, r2, x2, r_n3, x_load)
+ct3 = CTParams(i1_nom, i2_nom, k_nom, s_nom, cos_phi, r2, x2, r_n3, x_load,
+               l2=l2, ts_nom=ts_nom, kp_r_nom=kp_r_nom)
 kz3 = KZParams(i_kz3, t_p3, "трёхфазное КЗ")
 modes = [(ct3, kz3)]
 if use_kz1:
-    ct1 = CTParams(i1_nom, i2_nom, k_nom, s_nom, cos_phi, r2, x2, r_n1, x_load)
+    ct1 = CTParams(i1_nom, i2_nom, k_nom, s_nom, cos_phi, r2, x2, r_n1, x_load,
+                   l2=l2, ts_nom=ts_nom, kp_r_nom=kp_r_nom)
     kz1 = KZParams(i_kz1, t_p1, "однофазное КЗ")
     modes.append((ct1, kz1))
 
@@ -383,13 +407,16 @@ try:
     with st.spinner("Каскадный расчёт методов…"):
         results = []
         for ct_m, kz in modes:
-            res = calculate(ct_m, kz, "both", theta_override, k_r)
+            res = calculate(ct_m, kz, "both", theta_override, k_r, standard=std_code)
+            ct_eff, kz_eff, _, _ = effective_ct_kz(ct_m, kz, std_code)
             if vah_active:
-                res.update(calculate_vah(ct_m, kz, vah_u_star or 1.0, vah_i0_star or 1.0,
-                                         theta_override, k_r, eps, vah_table=vah_table))
+                res.update(calculate_vah(ct_eff, kz_eff, vah_u_star or 1.0,
+                                         vah_i0_star or 1.0, theta_override, k_r, eps,
+                                         vah_table=vah_table))
             if bn_active:
-                res.update(calculate_bn(ct_m, kz, bn_data, bn_params["w2"], bn_params["s"],
-                                        bn_params["l"], theta_override, k_r, eps))
+                res.update(calculate_bn(ct_eff, kz_eff, bn_data, bn_params["w2"],
+                                        bn_params["s"], bn_params["l"],
+                                        theta_override, k_r, eps))
             results.append((ct_m, kz, res))
 except ValueError as e:
     st.error(f"Ошибка исходных данных: {e}")
@@ -406,16 +433,22 @@ with tab_res:
         " ".join(summary_lines))
     st.markdown("#### Сводка по всем методам (каскад: от грубого к точному)")
     st.table(summary_rows)
-    st.caption("Итог вынесен по определяющему методу: **"
-               + PRIMARY_NAMES.get(primary, "нет применимого метода") + "**.")
+    st.caption("Стандарт: **" + standard_name + "** · K_r = " + f"{k_r:g}"
+               + (" (вручную)" if custom_kr else " (по умолчанию)")
+               + " · Итог по методу: **" + PRIMARY_NAMES.get(primary, "—") + "**.")
 
     for ct_m, kz, res in results:
         st.subheader(f"Режим: {kz.label}")
+        ct_eff, kz_eff, ts_val, t_eff = effective_ct_kz(ct_m, kz, std_code)
+        a_val = res[ANALYTIC_KEYS[0]].a
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Iкз", f"{kz.i_kz:g} А")
         c2.metric("Kфакт", f"{kz.i_kz / ct_m.i1_nom:.2f}")
         c3.metric("Rн.факт", f"{ct_m.r_load_fact:.3f} Ом")
-        c4.metric("A (формула 9)", f"{res[ANALYTIC_KEYS[0]].a:.3f}")
+        c4.metric("A", f"{a_val:.3f}")
+        if is_71879 and ts_val is not None:
+            st.caption(f"T_s = {ts_val * 1000:.0f} мс · T = min(T_а.экв, T_s) = "
+                       f"{t_eff * 1000:.0f} мс · ω·L2 = {OMEGA * l2:.3f} Ом")
 
         seen = set()
         for keys, _ in ((ANALYTIC_KEYS, "Аналитический"), (GRAPHIC_KEYS, "Графический"),
@@ -443,7 +476,7 @@ with tab_res:
                 continue
             with st.expander("📈 K_п.р(t) — " + ("без" if "without" in k else "с")
                              + " остаточной намагниченности", expanded=True):
-                chart_kpr(ct_m, kz, r, r.a * (1 - r.k_r))
+                chart_kpr(ct_eff, kz_eff, r, r.a * (1 - r.k_r))
 
         if VAH_KEYS[0] in res and vah_curve_final:
             with st.expander("📈 ВАХ (использованная в расчёте)"):
@@ -454,7 +487,7 @@ with tab_res:
             with st.expander("📈 Характеристика намагничивания (использованная в расчёте)"):
                 chart_generic(bn_data["h"], bn_data["b"], "H, А/м", "B, Тл",
                               "B(H) ТТ", "#9467bd")
-                _, _, det, _ = validate_bn_usage(ct_m, kz, bn_data, bn_params["w2"],
+                _, _, det, _ = validate_bn_usage(ct_eff, kz_eff, bn_data, bn_params["w2"],
                                                  bn_params["s"], bn_params["l"], eps)
                 st.caption(det + ". Условие (21): B_me(H_e) ≥ 1,8 Тл.")
 
@@ -473,12 +506,14 @@ with tab_res:
 with tab_check:
     @st.cache_data(show_spinner="Самопроверка…")
     def checks():
-        return run_self_checks(), run_graphic_checks(), run_method_comparison()
-    (ra, oka), (rg, okg), rc = checks()
-    st.markdown("#### Исходные данные эталонов (Приложение В)")
+        return (run_self_checks(), run_self_checks_71879(),
+                run_graphic_checks(), run_method_comparison())
+    (ra, oka), (r71, ok71), (rg, okg), rc = checks()
+
+    st.markdown("#### ГОСТ Р 58669-2019 — Приложение В (В.1.1–В.1.3)")
     for ex in REFERENCE_EXAMPLES:
         cc = ex['ct']
-        with st.expander(f"{ex['id']} — {ex['name']}"):
+        with st.expander(f"{ex['id']} — {ex['name']}: исходные данные"):
             st.caption(f"I1ном={cc['i1_nom']:g} А, I2ном={cc['i2_nom']:g} А, "
                        f"Kном={cc['k_nom']:g}, Sном={cc['s_nom']:g} ВА, "
                        f"cos φ={cc['cos_phi_nom']:g}, R2={cc['r2']:g} Ом.")
@@ -487,15 +522,28 @@ with tab_check:
                            f"Rн={m['r_load']:g} Ом; эталон A={m['a_expected']}, "
                            f"t={m['t_expected_ms']} мс.")
     if oka:
-        st.success("✅ Все эталоны Приложения В воспроизведены")
+        st.success("✅ Эталонные примеры 58669 воспроизведены")
     else:
-        st.error("❌ Расхождение с эталонами")
+        st.error("❌ Расхождение с эталонами 58669")
     st.dataframe(ra, hide_index=True)
+
+    st.markdown("#### ГОСТ Р 71879-2024 — Приложение Б (пример Б.1, 10PR 2000/1)")
+    st.caption("Исходные данные: I1ном=2000 А, I2ном=1 А, Kном=40, Sном=20 ВА, cos φ=0,8, "
+               "R2=6,96 Ом, L2=0,00182 Гн, Ts.ном=0,507 с (восстановлено из примера), "
+               "Kп.р.ном=1, K_r=0,085; Rн=6,3/12,6 Ом; Iкз=23145/26900 А; Tа=128/180 мс.")
+    if ok71:
+        st.success("✅ Пример Б.1 воспроизведён (A, Ts, t′ — по обоим видам КЗ)")
+    else:
+        st.error("❌ Расхождение с примером Б.1")
+    st.dataframe(r71, hide_index=True)
+
+    st.markdown("#### Свойства формулы (Г.15)")
     if okg:
-        st.success("✅ Свойства формулы (Г.15) подтверждены")
+        st.success("✅ Все проверки пройдены")
     else:
         st.error("❌ Расхождение в графическом методе")
     st.dataframe(rg, hide_index=True)
+
     st.markdown("#### Сопоставление методов (справочно)")
     st.dataframe(rc, hide_index=True)
 
@@ -503,66 +551,70 @@ with tab_check:
 # Вкладка «Теория»
 # ---------------------------------------------------------------------------
 with tab_theory:
-    st.markdown("### 1. Каскад методов и определяющий метод")
-    st.markdown("Порядок: **аналитический (5.1) → графический по паспортным данным (5.2) → "
-                "по ВАХ (5.3) → по характеристике намагничивания (5.4)**. Каждый следующий "
-                "уточняет результат при наличии данных. Итог — по самому точному из доступных.")
-    st.markdown("### 2. Характеристики: откуда брать данные")
-    st.markdown("**ВАХ** — из паспорта/заводской документации ТТ либо измерением при проверке "
-                "(ГОСТ Р 70507.2-2024, п. 6.7.5 и 9.17; РД 153-34.0-35.301-2002). "
-                "Контрольные точки — 10, 20, 80, 100, 200 % тока точки перегиба.\n\n"
-                "**B(H)** — w2, s, l из конструктивных данных паспорта (пример В.4.1.1: "
-                "«w2 = 1997 витков, s = 13,125 см², l = 1,437 м»); сама кривая — заводские "
-                "данные или измерения (РД 153-34.0-35.301-2002, п. 1.4).\n\n"
-                "Формат файла: две числовые колонки. Для ВАХ — I₀ (А) и U (В); "
-                "для B(H) — H (А/м) и B (Тл). Разделитель `;` или `,`, десятичная точка "
-                "или запятая — распознаются автоматически. Шаблоны CSV — во вкладке "
-                "«Характеристики». Минимум 5 точек.")
-    st.markdown("### 3. Условия применимости")
+    st.markdown("### 1. Два стандарта на время до насыщения")
+    st.markdown("**ГОСТ Р 58669-2019** — классы P, PX, TPX (замкнутый магнитопровод, "
+                "остаточная намагниченность не ограничена, K_r = 0,86).\n\n"
+                "**ГОСТ Р 71879-2024** — классы 5PR, 10PR, TPY, TPZ, TPE (нормируемая "
+                "погрешность в переходных режимах, ограниченное остаточное потоко­сцепление, "
+                "K_r по паспорту, при отсутствии данных — 0,1). Отличия: в z2Σ входит ω·L2, "
+                "A умножается на Kп.р.ном, расчётная постоянная T = min(T_а.экв, T_s), где "
+                "T_s — фактическая постоянная времени вторичного контура.")
+    st.markdown("### 2. Формулы ГОСТ Р 58669-2019")
+    st.code("z2Σном = √((R2 + zн.ном·cos φ)² + (X2 + zн.ном·sin φ)²)    (10)\n"
+            "z2Σ    = √((R2 + Rн.факт)² + (X2 + Xн.факт)²)              (11)\n"
+            "A      = I1ном·Kном·z2Σном / (Iкз·z2Σ)                      (9)\n"
+            "t_нас  = T_p·ln( ω·T_p / (ω·T_p + 1 − A·(1−K_r)) )         (3), (6)",
+            language="text")
+    st.markdown("### 3. Формулы ГОСТ Р 71879-2024 (первое КЗ)")
+    st.code("z2Σ    = √((R2 + Rн.факт)² + (ω·L2 + Xн.факт)²)\n"
+            "z2Σном = √((R2 + zн.ном·cos φном)² + (ω·L2 + zн.ном·sin φном)²)\n"
+            "A      = I1ном·Kном·Kп.р.ном·z2Σном / (Iкз·z2Σ)               (4)\n"
+            "T_s    = Ts.ном·(R2 + zн.ном·cos φном) / (R2 + Rн.факт)       (5)\n"
+            "T      = min(T_а.экв, T_s)\n"
+            "t′_нас = T·ln( ω·T / (ω·T + 1 − A·(1−K_r)) )                  (6)",
+            language="text")
+    st.warning("Формула (5) для T_s восстановлена по результатам примера Б.1 — текст "
+               "раздела 5 стандарта будет сверен дополнительно (см. «О приложении»).")
+    st.markdown("### 4. Условия применимости")
     st.markdown("""
 | Условие | Если выполняется | Если НЕ выполняется |
 |---|---|---|
-| A > 1 (усл. 5) | предельный ток ТТ больше тока КЗ | эксплуатация недопустима |
-| ωT_p+1 > A (усл. 4) | насыщение при конечном t | насыщения нет |
-| A(1−K_r) > 1 (усл. 8) | применима формула (6) | графический метод (п. 5.1.5) |
-| ωT_p+1 > A(1−K_r) (усл. 7) | насыщение при конечном t | насыщения нет |
+| A > 1 (усл. 5) | предельный ток больше тока КЗ | эксплуатация недопустима |
+| ωT + 1 > A (усл. 4) | насыщение при конечном t | насыщения нет |
+| A(1−K_r) > 1 (усл. 8) | формула времени применима | графический метод (п. 5.1.5) |
+| ωT + 1 > A(1−K_r) (усл. 7) | насыщение при конечном t | насыщения нет |
 | t_нас ≥ 15 мс (п. 5.1.7) | аналитика точна | уточнить графически |
 | (I0ε/Uε)/(Iлин/Uлин) > 3 (усл. 16) | ВАХ-метод применим | ВАХ-метод неприменим |
 | B_me(H_e) ≥ 1,8 Тл (усл. 21) | B(H)-метод применим | B(H)-метод неприменим |
 """)
-    st.markdown("### 4. Формулы")
-    st.code("t_нас = T_p·ln( ω·T_p / (ω·T_p + 1 − A·(1−K_r)) )        (3), (6)\n\n"
-            "ВАХ:   Kфакт = Iкз/I1ном                              (18)\n"
-            "       I0ε = (ε/100)·I2ном·Kфакт                        (17)\n"
-            "       U2sin = Kфакт·I2ном·z2Σ                          (20)\n"
-            "       A = Uε / U2sin                                   (19)\n\n"
-            "B(H):  H_e = I0ε·w2 / l                                 (22)\n"
-            "       B_m = U2sin / (222·w2·s)                         (24)\n"
-            "       A = B_me / B_m                                   (23)", language="text")
-    st.warning("В формуле времени «+1» — только в знаменателе. В формуле (23) порог 1,8 Тл "
-               "относится к B_me с кривой намагничивания, а не к рабочей B_m.")
-    st.markdown("### 5. Разобранный пример В.1.1")
-    st.markdown("I1ном=2000, I2ном=1, Kном=20, Sном=40, cos φ=0,8, R2=7,51, Rн=6,3, "
-                "Iкз=23145, T_p=0,128. z2Σном=46,23 Ом; z2Σ=13,81 Ом; A=5,785; ωT_p=40,21; "
-                "t_нас=0,128·ln(40,21/35,43)=**16,22 мс** — совпадает с ГОСТ.")
+    st.markdown("### 5. ВАХ и B(H): формулы и источники данных")
+    st.code("ВАХ:  I0ε = (ε/100)·I2ном·Kфакт  (17);  U2sin = Kфакт·I2ном·z2Σ  (20)\n"
+            "      A = Uε / U2sin  (19)\n"
+            "B(H): H_e = I0ε·w2 / l  (22);  B_m = U2sin / (222·w2·s)  (24)\n"
+            "      A = B_me / B_m  (23)", language="text")
+    st.markdown("**ВАХ** — паспорт ТТ или измерения (ГОСТ Р 70507.2-2024, п. 6.7.5, 9.17; "
+                "РД 153-34.0-35.301-2002). **B(H)** — w2, s, l из паспорта "
+                "(пример В.4.1.1: «w2 = 1997, s = 13,125 см², l = 1,437 м»); кривая — "
+                "заводские данные или измерения.")
+    st.markdown("### 6. Разобранный пример В.1.1 (58669)")
+    st.markdown("A = 5,785; ωT_p = 40,21; t_нас = 0,128·ln(40,21/35,43) = **16,22 мс**.")
 
-# ---------------------------------------------------------------------------
-# Вкладка «О приложении»
-# ---------------------------------------------------------------------------
 with tab_about:
     st.markdown("""
-**Релиз 2.0:** вкладка «Характеристики» — ввод ВАХ и B(H) из файла (CSV/Excel),
-вручную (редактируемая таблица) или типовая кривая; шаблоны CSV; контроль количества
-и корректности точек; превью загруженной кривой; реальные таблицы передаются в расчёт
-и в Word-отчёт. Сайдбар разгружен.
+**Релиз 2.1:** поддержка ГОСТ Р 71879-2024 — классы 5PR/10PR/TPY/TPZ/TPE, первое КЗ:
+параметры L2, Ts.ном, Kп.р.ном; T = min(T_а.экв, T_s); A с множителем Kп.р.ном и ω·L2
+в z2Σ; K_r по умолчанию 0,1; самопроверка по примеру Б.1.
 
-**Ранее:** 1.10 — каскад методов с итоговым выводом (summary.py), исправлены формулы (16)–(24);
+**Не реализовано в 2.1 (релиз 2.2):** второе КЗ (АПВ) по формулам (9), (12), (13),
+(В.30)–(В.32) ГОСТ Р 71879-2024 — текст формул требует сверки с оригиналом.
+
+**Ранее:** 2.0 — ввод ВАХ и B(H) из файла/вручную; 1.10 — каскад методов (summary);
 1.9 — монотонная B(H), ручной K_r; 1.8 — прозрачная самопроверка; 1.7 — метод B(H);
-1.6 — метод ВАХ; 1.5 — кабель; 1.4 — графики в Word, ручной θ; 1.3 — графический метод;
+1.6 — метод ВАХ; 1.5 — кабель; 1.4 — графики в Word; 1.3 — графический метод;
 1.2 — модули; 1.1 — корректная формула t_нас.
 
-**Ограничения:** классы P/PX/TPX; одна экспонента T_р.экв; для точного расчёта нужны
-фактические характеристики конкретного ТТ.
+**Поправки к стандартам:** к ГОСТ Р 58669-2019 учтена Поправка (ИУС 6–7, 2020).
+К стандартам 2024 г. поправок в переданных редакциях нет; при появлении — будут внесены.
 """)
 
 # === КОНЕЦ ФАЙЛА app.py ===
