@@ -93,7 +93,7 @@ with st.sidebar:
     std_code = "71879" if is_71879 else "58669"
     ct_class = None
     l2 = ts_nom = kp_r_nom = 0.0
-        if is_71879:
+    if is_71879:
         ct_class = st.selectbox("Класс точности", PR_CLASSES)
         l2 = st.number_input("L2 — индуктивность рассеяния, Гн", min_value=0.0,
                              max_value=1.0, value=0.00182, step=0.00001,
