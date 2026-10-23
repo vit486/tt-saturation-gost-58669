@@ -1,4 +1,4 @@
-"""Отчёт Word: все методы, каскадный вывод, графики. Релиз 2.1."""
+"""Отчёт Word: все методы, каскадный вывод, графики. Релиз 2.2 (второе КЗ)."""
 from __future__ import annotations
 
 import io
@@ -11,7 +11,7 @@ from docx import Document
 from docx.shared import Inches
 
 from methods.gost_58669 import (
-    ANALYTIC_KEYS, GRAPHIC_KEYS, VAH_KEYS, BN_KEYS, K_R_PRED,
+    ANALYTIC_KEYS, GRAPHIC_KEYS, VAH_KEYS, BN_KEYS, SECOND_KZ_KEYS, K_R_PRED,
     ST_NO_SAT, ST_OK, ST_STEADY, build_kpr_curve, ts_fact_71879,
 )
 from methods.summary import build_summary
@@ -157,6 +157,9 @@ def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="b
             ("Ts.ном", f"{chain['ts_nom']:g} с"),
             ("Kп.р.ном", f"{chain['kp_r_nom']:g}"),
         ]
+        if chain.get("use_second_kz") and chain.get("t_bp") is not None:
+            rows.append(("Второе КЗ (АПВ): бестоковая пауза t_б.п",
+                         f"{chain['t_bp']:g} с"))
     if vah_curve:
         rows.append(("ВАХ (п. 5.3)", f"{len(vah_curve['i0'])} точек"))
     if bn_data and bn_params:
@@ -194,13 +197,14 @@ def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="b
         all_rows = _method_rows(res, ANALYTIC_KEYS, k_r, "аналитический") + \
                    _method_rows(res, GRAPHIC_KEYS, k_r, "графический") + \
                    _method_rows(res, VAH_KEYS, k_r, "по ВАХ") + \
-                   _method_rows(res, BN_KEYS, k_r, "по B(H)")
+                   _method_rows(res, BN_KEYS, k_r, "по B(H)") + \
+                   _method_rows(res, SECOND_KZ_KEYS, k_r, "второе КЗ (АПВ)")
         if all_rows:
             _table(doc, ["Метод и сценарий", "A", "Время до насыщения", "Уточнение"],
                    all_rows)
 
         seen = set()
-        for key in ANALYTIC_KEYS + GRAPHIC_KEYS + VAH_KEYS + BN_KEYS:
+        for key in ANALYTIC_KEYS + GRAPHIC_KEYS + VAH_KEYS + BN_KEYS + SECOND_KZ_KEYS:
             r = res.get(key)
             if r is None:
                 continue
