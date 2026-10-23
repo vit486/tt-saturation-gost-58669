@@ -28,7 +28,6 @@ ST_NO_SAT = "no_saturation"
 ST_STEADY = "steady_saturation"
 ST_GRAPHIC_REQUIRED = "graphic_required"
 
-# Единый текст для условия (5), чтобы примечания разных методов не дублировались
 NOTE_A_LE_1 = ("A ≤ 1: ток КЗ превышает ток предельной кратности ТТ — эксплуатация "
                "недопустима (условие (5) ГОСТ).")
 
@@ -52,7 +51,6 @@ class CTParams:
 
     @property
     def z2_sigma_nom(self) -> float:
-        """Формула (10)."""
         sin_phi = math.sqrt(max(0.0, 1.0 - self.cos_phi_nom ** 2))
         return math.sqrt((self.r2 + self.z_n_nom * self.cos_phi_nom) ** 2
                          + (self.x2 + self.z_n_nom * sin_phi) ** 2)
@@ -67,7 +65,6 @@ class CTParams:
 
     @property
     def z2_sigma(self) -> float:
-        """Формула (11)."""
         return math.sqrt(self.r_total ** 2 + self.x_total ** 2)
 
     @property
@@ -76,7 +73,6 @@ class CTParams:
 
     @property
     def cos_alpha(self) -> float:
-        """Формула (12)."""
         z = self.z2_sigma
         return self.r_total / z if z > 0 else 1.0
 
@@ -132,7 +128,7 @@ def _analytic(ct, kz, k_r, a) -> SaturationResult:
         notes.append("Условие (7) ГОСТ не выполняется: ω·T_p + 1 ≤ A·(1−K_r) — насыщения нет.")
         return SaturationResult(a, k_r, ST_NO_SAT, None, notes, "analytic", None, ct.cos_alpha)
 
-    t_nas = kz.t_p * math.log((OMEGA * kz.t_p) / denom)   # формулы (3)/(6)
+    t_nas = kz.t_p * math.log((OMEGA * kz.t_p) / denom)
     if t_nas * 1000.0 < T_NAS_MIN_MS:
         notes.append(f"t_нас = {t_nas * 1000:.1f} мс < {T_NAS_MIN_MS:.0f} мс — уточните "
                      "графическим методом (п. 5.1.7).")
@@ -223,7 +219,7 @@ def _graphic(ct, kz, k_r, a, theta_override=None) -> SaturationResult:
 # ---------------------------------------------------------------------------
 
 def build_vah_default(u_star, i0_star, r2, n_points=100):
-    """Типовая ВАХ ТТ. Возвращает dict с массивами i0, u, psi."""
+    """Типовая ВАХ ТТ."""
     i0_max = i0_star * 3.0
     i0_arr = np.linspace(0.001, i0_max, n_points)
     x = i0_arr / i0_star
@@ -267,21 +263,21 @@ def validate_vah_usage(u_star, i0_star, ct, kz):
     return False, f"Условие (16) не выполняется: отношение = {ratio:.2f} ≤ 3."
 
 
-def calculate_vah(ct, kz, u_star, i0_star, theta_override=None):
+def calculate_vah(ct, kz, u_star, i0_star, theta_override=None, k_r=K_R_PRED):
     """Метод по ВАХ. Возвращает результаты для обоих сценариев остаточной намагниченности."""
     valid, msg = validate_vah_usage(u_star, i0_star, ct, kz)
     if valid:
         u2sin = calc_u2sin(ct, kz)
         a_vah = calc_a_from_vah(u_star, u2sin)
         wo = _graphic(ct, kz, 0.0, a_vah, theta_override)
-        w = _graphic(ct, kz, K_R_PRED, a_vah, theta_override)
+        w = _graphic(ct, kz, k_r, a_vah, theta_override)
         note = f"Метод по ВАХ: A = {a_vah:.3f} (формула 19), U* = {u_star:.1f} В"
         wo.notes.insert(0, note)
         w.notes.insert(0, note)
     else:
         wo = SaturationResult(0.0, 0.0, ST_GRAPHIC_REQUIRED, None,
                               [f"Метод по ВАХ неприменим: {msg}"], "vah", None, ct.cos_alpha)
-        w = SaturationResult(0.0, K_R_PRED, ST_GRAPHIC_REQUIRED, None,
+        w = SaturationResult(0.0, k_r, ST_GRAPHIC_REQUIRED, None,
                              [f"Метод по ВАХ неприменим: {msg}"], "vah", None, ct.cos_alpha)
     return {"vah_without_residual": wo, "vah_with_residual": w}
 
@@ -291,12 +287,21 @@ def calculate_vah(ct, kz, u_star, i0_star, theta_override=None):
 # ---------------------------------------------------------------------------
 
 def build_bn_default(b_sat=1.8, h_knee=100, n_points=100):
-    """Типовая характеристика намагничивания B(H)."""
-    h_arr = np.linspace(0, h_knee * 5, n_points)
-    mu_initial = b_sat / h_knee
-    b_arr = np.where(h_arr <= h_knee,
-                     mu_initial * h_arr,
-                     b_sat * (1 - np.exp(-(h_arr - h_knee) / (h_knee * 0.5))))
+    """Типовая характеристика намагничивания B(H).
+
+    Физически корректная форма: монотонный рост от нуля, линейный участок
+    до точки излома (колена), затем плавное насыщение. Обе ветви сшиты в точке
+    колена без разрыва, поэтому кривая нигде не падает и не имеет изломов вниз.
+    """
+    h_arr = np.linspace(0.0, h_knee * 5, n_points)
+    b_knee = 0.9 * b_sat            # индукция в точке излома (~90 % от насыщения)
+    mu_i = b_knee / h_knee          # начальная магнитная проницаемость (линейный участок)
+    h_scale = 0.3 * h_knee          # масштаб экспоненты насыщения после колена
+    b_arr = np.where(
+        h_arr <= h_knee,
+        mu_i * h_arr,                                                   # линейный участок
+        b_sat - (b_sat - b_knee) * np.exp(-(h_arr - h_knee) / h_scale)  # насыщение
+    )
     return {'h': h_arr.tolist(), 'b': b_arr.tolist(),
             'b_sat': b_sat, 'h_knee': h_knee}
 
@@ -351,21 +356,21 @@ def validate_bn_usage(ct, kz, bn_data, w2, s, l):
                    "магнитопровод не насыщается при данном токе КЗ.")
 
 
-def calculate_bn(ct, kz, bn_data, w2, s, l, theta_override=None):
+def calculate_bn(ct, kz, bn_data, w2, s, l, theta_override=None, k_r=K_R_PRED):
     """Метод по характеристике намагничивания. Всегда возвращает видимый результат."""
     valid, msg = validate_bn_usage(ct, kz, bn_data, w2, s, l)
     b_t = calc_b_t(ct, kz, w2, s)
     if valid:
         a_bn = calc_a_from_bn(ct, kz, bn_data, w2, s, l)
         wo = _graphic(ct, kz, 0.0, a_bn, theta_override)
-        w = _graphic(ct, kz, K_R_PRED, a_bn, theta_override)
+        w = _graphic(ct, kz, k_r, a_bn, theta_override)
         note = f"Метод по B(H): A = {a_bn:.3f} (формула 23), Bт = {b_t:.2f} Тл"
         wo.notes.insert(0, note)
         w.notes.insert(0, note)
     else:
         wo = SaturationResult(0.0, 0.0, ST_NO_SAT, None,
                               [f"Метод по B(H): {msg}"], "bn", None, ct.cos_alpha)
-        w = SaturationResult(0.0, K_R_PRED, ST_NO_SAT, None,
+        w = SaturationResult(0.0, k_r, ST_NO_SAT, None,
                              [f"Метод по B(H): {msg}"], "bn", None, ct.cos_alpha)
     return {"bn_without_residual": wo, "bn_with_residual": w}
 
@@ -378,16 +383,21 @@ ALL_KEYS = ANALYTIC_KEYS + GRAPHIC_KEYS + VAH_KEYS + BN_KEYS
 
 
 def calculate(ct: CTParams, kz: KZParams, method: str = "analytic",
-              theta_override: Optional[float] = None) -> dict:
-    """Расчёт для обоих вариантов остаточной намагниченности."""
+              theta_override: Optional[float] = None, k_r: float = K_R_PRED) -> dict:
+    """Расчёт для обоих вариантов остаточной намагниченности.
+
+    k_r — коэффициент остаточной намагниченности для сценария «с остаточной
+    намагниченностью». По умолчанию 0,86 (класс P, п. 5.1.3); для классов
+    5PR/10PR или по заводским данным может задаваться пользователем (например 0,1).
+    """
     a = calc_a_param(ct, kz)
     out = {
         "without_residual": _analytic(ct, kz, 0.0, a),
-        "with_residual": _analytic(ct, kz, K_R_PRED, a),
+        "with_residual": _analytic(ct, kz, k_r, a),
     }
     if method in ("graphic", "both"):
         out["graphic_without_residual"] = _graphic(ct, kz, 0.0, a, theta_override)
-        out["graphic_with_residual"] = _graphic(ct, kz, K_R_PRED, a, theta_override)
+        out["graphic_with_residual"] = _graphic(ct, kz, k_r, a, theta_override)
     return out
 
 
