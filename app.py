@@ -481,7 +481,7 @@ try:
     with st.spinner("Каскадный расчёт методов…"):
         results = []
         for ct_m, kz in modes:
-            res = calculate(ct_m, kz, "both", theta_override, k_r, standard=std_code)
+            res = calculate(ct_m, kz, method, theta_override, k_r, standard=std_code)
             ct_eff, kz_eff, _, _ = effective_ct_kz(ct_m, kz, std_code)
             if vah_active:
                 res.update(calculate_vah(ct_eff, kz_eff, vah_u_star or 1.0,
