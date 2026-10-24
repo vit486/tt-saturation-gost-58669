@@ -469,7 +469,201 @@ def calculate_second_kz_71879(ct, kz, k_r, t_bp):
         out[key] = SaturationResult(a, kr, status, t, notes, "second_kz",
                                     cos_alpha=ct_eff.cos_alpha)
     return out
+# ---------------------------------------------------------------------------
+# ГРАФИЧЕСКИЙ МЕТОД ГОСТ Р 71879-2024: формулы (12), (13), (14).
+# РЕЖИМ ПРЕДПРОСМОТРА: численная сверка с примером Б.2 ещё не выполнена,
+# в определяющий вердикт эти результаты не включаются.
+# ---------------------------------------------------------------------------
 
-# === КОНЕЦ ФАЙЛА methods/gost_58669.py ===
+GRAPHIC71_KEYS = ("graphic71_without_residual", "graphic71_with_residual")
+SECOND_GRAPHIC71_KEYS = ("second_graphic71_without_residual",
+                         "second_graphic71_with_residual")
+NOTE_71_PREVIEW = ("Предварительная реализация формул (12)–(14) ГОСТ Р 71879-2024: "
+                   "численная сверка с приложением Б.2 ещё не выполнена.")
+
+
+def k_pr1_71879(t, t_a, t_s, theta):
+    """Формула (12): K'_п.р(t) первого КЗ при произвольной начальной фазе θ."""
+    if np is None:
+        raise RuntimeError("Требуется numpy.")
+    t_arr = np.asarray(t, dtype=float)
+    return (OMEGA * t_a * np.exp(-t_arr / t_s) * math.cos(theta)
+            - OMEGA * t_a * np.cos(OMEGA * t_arr + theta) * np.exp(-t_arr / t_a)
+            + np.sin(OMEGA * t_arr + theta)
+            - math.sin(theta) * np.exp(-t_arr / t_a))
+
+
+def k_pr2_71879(t, t2, t_a, t_s, phi, k1_t2):
+    """Формула (13): K''_п.р(t) второго КЗ для t >= t2."""
+    if np is None:
+        raise RuntimeError("Требуется numpy.")
+    dt = np.asarray(t, dtype=float) - t2
+    return (k1_t2
+            + OMEGA * t_a * np.exp(-dt / t_s) * math.cos(phi)
+            - OMEGA * t_a * np.cos(OMEGA * dt + phi) * np.exp(-dt / t_a)
+            + np.sin(OMEGA * dt + phi)
+            - math.sin(phi) * np.exp(-dt / t_a))
+
+
+def theta_from_phi_71879(phi, t_a):
+    """Формула (14): θ = φкз − arctg(ω·Ta.экв)."""
+    return phi - math.atan(OMEGA * t_a)
+
+
+def build_kpr1_curve_71879(t_a, t_s, theta, t_end_ms, n=1200):
+    """Массивы (t [мс], K'_п.р) для графика по формуле (12)."""
+    t = np.linspace(0.0, max(t_end_ms, 1.0) / 1000.0, n)
+    return t * 1000.0, np.asarray(k_pr1_71879(t, t_a, t_s, theta), dtype=float)
+
+
+def t_nas_graphic_first_71879(a, t_a, t_s, k_r, phi_fixed=None, n_phi=181, n_t=4000):
+    """Первое КЗ по (12): минимум по φкз ∈ [0°, 90°], θ определяется по (14).
+    Возвращает (t_нас [с], φкз [рад], статус)."""
+    if np is None:
+        raise RuntimeError("Требуется numpy.")
+    eff = a * (1.0 - k_r)
+    if eff <= 0.0:
+        return None, None, "invalid"
+    t_max = max(0.25, 6.0 * min(t_a, t_s))
+    n_t = int(min(12000, max(n_t, t_max / 0.0002)))
+    t = np.linspace(0.0, t_max, n_t)
+    phis = ([float(phi_fixed)] if phi_fixed is not None
+            else np.linspace(0.0, np.pi / 2.0, n_phi))
+    best_t = best_phi = None
+    for phi in phis:
+        th = theta_from_phi_71879(float(phi), t_a)
+        k_arr = k_pr1_71879(t, t_a, t_s, th)
+        hit = np.nonzero(k_arr >= eff)[0]
+        if hit.size == 0 or hit[0] == 0:
+            continue
+        j = int(hit[0])
+        lo, hi = float(t[j - 1]), float(t[j])
+        for _ in range(45):
+            mid = 0.5 * (lo + hi)
+            if float(k_pr1_71879(mid, t_a, t_s, th)) >= eff:
+                hi = mid
+            else:
+                lo = mid
+        tc = 0.5 * (lo + hi)
+        if best_t is None or tc < best_t:
+            best_t, best_phi = tc, float(phi)
+    if best_t is None:
+        return None, None, ST_NO_SAT
+    return best_t, best_phi, ST_OK
+
+
+def t_nas_graphic_second_71879(a, t_a, t_s, t_kz1, t_bp, k_r,
+                               phi_fixed=None, n_phi=181, n_t=4000):
+    """Второе КЗ по (13): время ОТНОСИТЕЛЬНО t2 (примечание 2 к п. 5.1.6).
+    Если K'_п.р(t2) >= A(1-K_r), то t''нас = 0 (дословно по пояснению к (13)).
+    Возвращает (t_нас [с] от t2, φкз [рад], статус)."""
+    if np is None:
+        raise RuntimeError("Требуется numpy.")
+    eff = a * (1.0 - k_r)
+    if eff <= 0.0:
+        return None, None, "invalid"
+    t2 = t_kz1 + t_bp
+    window = max(0.25, 6.0 * min(t_a, t_s))
+    n_t = int(min(12000, max(n_t, window / 0.0002)))
+    dt_grid = np.linspace(0.0, window, n_t)
+    phis = ([float(phi_fixed)] if phi_fixed is not None
+            else np.linspace(0.0, np.pi / 2.0, n_phi))
+    best_t = best_phi = None
+    for phi in phis:
+        phi = float(phi)
+        th = theta_from_phi_71879(phi, t_a)
+        k1_t2 = float(k_pr1_71879(t2, t_a, t_s, th))
+        if k1_t2 >= eff:
+            tc_rel = 0.0          # насыщение уже к моменту второго КЗ
+        else:
+            k_arr = k_pr2_71879(dt_grid + t2, t2, t_a, t_s, phi, k1_t2)
+            hit = np.nonzero(k_arr >= eff)[0]
+            if hit.size == 0 or hit[0] == 0:
+                continue
+            j = int(hit[0])
+            lo, hi = float(dt_grid[j - 1]), float(dt_grid[j])
+            for _ in range(45):
+                mid = 0.5 * (lo + hi)
+                val = float(k_pr2_71879(mid + t2, t2, t_a, t_s, phi, k1_t2))
+                if val >= eff:
+                    hi = mid
+                else:
+                    lo = mid
+            tc_rel = 0.5 * (lo + hi)
+        if best_t is None or tc_rel < best_t:
+            best_t, best_phi = tc_rel, phi
+    if best_t is None:
+        return None, None, ST_NO_SAT
+    return best_t, best_phi, ST_OK
+
+
+def calculate_graphic_71879(ct, kz, k_r, phi_override=None):
+    """Графический метод 71879 для ПЕРВОГО КЗ (предпросмотр)."""
+    ct_eff, kz_eff, ts, _ = effective_ct_kz(ct, kz, "71879")
+    a = calc_a_param(ct_eff, kz_eff)
+    out = {}
+    for key, kr in (("graphic71_without_residual", 0.0),
+                    ("graphic71_with_residual", k_r)):
+        notes = [NOTE_71_PREVIEW]
+        if ts <= 0:
+            notes.append("T_s ≤ 0 — графический метод 71879 неприменим.")
+            out[key] = SaturationResult(a, kr, ST_GRAPHIC_REQUIRED, None, notes,
+                                        "graphic71", cos_alpha=ct_eff.cos_alpha)
+            continue
+        if a <= 1.0:
+            notes.append(NOTE_A_LE_1)
+            out[key] = SaturationResult(a, kr, ST_STEADY, 0.0, notes,
+                                        "graphic71", cos_alpha=ct_eff.cos_alpha)
+            continue
+        t, phi_star, why = t_nas_graphic_first_71879(a, kz.t_p, ts, kr,
+                                                     phi_fixed=phi_override)
+        if why == ST_NO_SAT or t is None:
+            notes.append("Насыщение отсутствует (уровень недостижим по формуле (12)).")
+            out[key] = SaturationResult(a, kr, ST_NO_SAT, None, notes,
+                                        "graphic71", cos_alpha=ct_eff.cos_alpha)
+            continue
+        th_star = theta_from_phi_71879(phi_star, kz.t_p)
+        tag = "заданном вручную" if phi_override is not None else "наихудшем"
+        notes.append(f"Формула (12): φкз = {math.degrees(phi_star):.1f}° ({tag}), "
+                     f"θ = {math.degrees(th_star):.1f}° по (14).")
+        out[key] = SaturationResult(a, kr, ST_OK, t, notes, "graphic71", th_star,
+                                    ct_eff.cos_alpha, phi_override is not None)
+    return out
+
+
+def calculate_second_graphic_71879(ct, kz, k_r, t_kz1, t_bp, phi_override=None):
+    """Графический метод 71879 для ВТОРОГО КЗ (предпросмотр)."""
+    ct_eff, kz_eff, ts, _ = effective_ct_kz(ct, kz, "71879")
+    a = calc_a_param(ct_eff, kz_eff)
+    out = {}
+    for key, kr in (("second_graphic71_without_residual", 0.0),
+                    ("second_graphic71_with_residual", k_r)):
+        notes = [NOTE_71_PREVIEW]
+        if ts <= 0:
+            notes.append("T_s ≤ 0 — графический метод 71879 неприменим.")
+            out[key] = SaturationResult(a, kr, ST_GRAPHIC_REQUIRED, None, notes,
+                                        "second_graphic71", cos_alpha=ct_eff.cos_alpha)
+            continue
+        if a <= 1.0:
+            notes.append(NOTE_A_LE_1)
+            out[key] = SaturationResult(a, kr, ST_STEADY, 0.0, notes,
+                                        "second_graphic71", cos_alpha=ct_eff.cos_alpha)
+            continue
+        t, phi_star, why = t_nas_graphic_second_71879(a, kz.t_p, ts, t_kz1, t_bp, kr,
+                                                      phi_fixed=phi_override)
+        if why == ST_NO_SAT or t is None:
+            notes.append("Насыщение при втором КЗ отсутствует (формула (13)).")
+            out[key] = SaturationResult(a, kr, ST_NO_SAT, None, notes,
+                                        "second_graphic71", cos_alpha=ct_eff.cos_alpha)
+            continue
+        if t == 0.0:
+            notes.append(f"Формулы (12)–(13): K'_п.р(t2) ≥ A·(1−K_r) при φкз = "
+                         f"{math.degrees(phi_star):.1f}° — насыщение уже к моменту второго КЗ.")
+        else:
+            notes.append(f"Формулы (12)–(13): φкз = {math.degrees(phi_star):.1f}°, "
+                         f"время отсчитано от t2.")
+        out[key] = SaturationResult(a, kr, ST_OK, t, notes, "second_graphic71",
+                                    None, ct_eff.cos_alpha)
+    return out
 
 # === КОНЕЦ ФАЙЛА methods/gost_58669.py ===
