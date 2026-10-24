@@ -1,4 +1,4 @@
-"""Отчёт Word: все методы, каскадный вывод, графики. Релиз 2.2.1 (второе КЗ: t_кз1, t_б.п, t2)."""
+"""Отчёт Word: все методы, каскадный вывод, графики. Релиз 2.3."""
 from __future__ import annotations
 
 import io
@@ -11,8 +11,9 @@ from docx import Document
 from docx.shared import Inches
 
 from methods.gost_58669 import (
-      ANALYTIC_KEYS, GRAPHIC_KEYS, VAH_KEYS, BN_KEYS, SECOND_KZ_KEYS,
+    ANALYTIC_KEYS, GRAPHIC_KEYS, VAH_KEYS, BN_KEYS, SECOND_KZ_KEYS,
     GRAPHIC71_KEYS, SECOND_GRAPHIC71_KEYS, K_R_PRED,
+    ST_NO_SAT, ST_OK, ST_STEADY, build_kpr_curve, ts_fact_71879,
 )
 from methods.summary import build_summary
 
@@ -198,7 +199,7 @@ def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="b
                                  f"{ts * 1000:.0f} / {min(kz.t_p, ts) * 1000:.0f} мс"))
         _table(doc, ["Параметр", "Значение"], mode_rows)
 
-               all_rows = _method_rows(res, ANALYTIC_KEYS, k_r, "аналитический") + \
+        all_rows = _method_rows(res, ANALYTIC_KEYS, k_r, "аналитический") + \
                    _method_rows(res, GRAPHIC_KEYS, k_r, "графический") + \
                    _method_rows(res, VAH_KEYS, k_r, "по ВАХ") + \
                    _method_rows(res, BN_KEYS, k_r, "по B(H)") + \
@@ -211,7 +212,7 @@ def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="b
                    all_rows)
 
         seen = set()
-                for key in (ANALYTIC_KEYS + GRAPHIC_KEYS + VAH_KEYS + BN_KEYS + SECOND_KZ_KEYS
+        for key in (ANALYTIC_KEYS + GRAPHIC_KEYS + VAH_KEYS + BN_KEYS + SECOND_KZ_KEYS
                     + GRAPHIC71_KEYS + SECOND_GRAPHIC71_KEYS):
             r = res.get(key)
             if r is None:
