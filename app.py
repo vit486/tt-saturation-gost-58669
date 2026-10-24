@@ -1,5 +1,5 @@
 """⚡ Проверка ТТ на насыщение при КЗ. ГОСТ Р 58669-2019 и ГОСТ Р 71879-2024.
-Релиз 2.2.1: раздельный ввод t_кз1 и t_б.п для второго КЗ (АПВ)."""
+Релиз 2.3: графический метод 71879 по формулам (12)–(14) в режиме предпросмотра."""
 import math
 from datetime import datetime
 
@@ -9,16 +9,18 @@ try:
     from methods.gost_58669 import (
         ANALYTIC_KEYS, CTParams, GRAPHIC_KEYS, K_R_PRED, K_R_PR_DEFAULT, KZParams,
         OMEGA, ST_NO_SAT, ST_OK, ST_STEADY, VAH_KEYS, BN_KEYS, SECOND_KZ_KEYS,
-        build_kpr_curve, calculate, build_vah_default, build_bn_default,
-        calculate_vah, calculate_bn, calculate_second_kz_71879,
-        validate_bn_inputs, validate_bn_usage, effective_ct_kz, ts_fact_71879,
+        GRAPHIC71_KEYS, SECOND_GRAPHIC71_KEYS, build_kpr_curve, build_kpr1_curve_71879,
+        calculate, build_vah_default, build_bn_default, calculate_vah, calculate_bn,
+        calculate_second_kz_71879, calculate_graphic_71879,
+        calculate_second_graphic_71879, validate_bn_inputs, validate_bn_usage,
+        effective_ct_kz, ts_fact_71879,
     )
     from methods.curve_io import (
         read_uploaded_curve, curve_from_dataframe, VAH_TEMPLATE, BN_TEMPLATE,
     )
     from methods.reference_examples import (
-        REFERENCE_EXAMPLES, run_graphic_checks, run_method_comparison,
-        run_self_checks, run_self_checks_71879,
+        REFERENCE_EXAMPLES, run_graphic_checks, run_graphic_checks_71879,
+        run_method_comparison, run_self_checks, run_self_checks_71879,
     )
     from methods.summary import build_summary
     from report.docx_report import build_report
@@ -29,8 +31,8 @@ except Exception as e:
 if _ERR is not None:
     st.set_page_config(page_title="Ошибка структуры файлов")
     st.error(f"Не загружены модули: {type(_ERR).__name__}: {_ERR}")
-    st.markdown("Проверьте файлы: `methods/gost_58669.py` (`SECOND_KZ_KEYS`), "
-                "`methods/reference_examples.py` (`EXAMPLE_71879_B1`), "
+    st.markdown("Проверьте файлы: `methods/gost_58669.py` (`GRAPHIC71_KEYS`), "
+                "`methods/reference_examples.py` (`def run_graphic_checks_71879(`), "
                 "`methods/curve_io.py`, `methods/summary.py`, `report/docx_report.py`.")
     st.stop()
 
@@ -39,7 +41,7 @@ import pandas as pd  # noqa: E402
 
 st.set_page_config(page_title="Проверка ТТ — ГОСТ Р 58669/71879", layout="wide", page_icon="⚡")
 st.title("⚡ Проверка трансформаторов тока")
-st.caption("ГОСТ Р 58669-2019 · ГОСТ Р 71879-2024 · каскад методов · релиз 2.2.1")
+st.caption("ГОСТ Р 58669-2019 · ГОСТ Р 71879-2024 · каскад методов · релиз 2.3")
 
 LBL_STAR = "θ = θ* — расчётный минимум (п. Г.3.7)"
 LBL_ZERO = "θ = 0° — максимум апериодической составляющей"
@@ -76,8 +78,12 @@ def make_scenario_title(key, k_r):
         "graphic_with_residual": "Графический (паспортные данные)",
         "vah_without_residual": "По ВАХ", "vah_with_residual": "По ВАХ",
         "bn_without_residual": "По B(H)", "bn_with_residual": "По B(H)",
-        "second_without_residual": "Второе КЗ (АПВ)",
-        "second_with_residual": "Второе КЗ (АПВ)",
+        "second_without_residual": "Второе КЗ (АПВ), аналитический",
+        "second_with_residual": "Второе КЗ (АПВ), аналитический",
+        "graphic71_without_residual": "Графический 71879, предпросмотр",
+        "graphic71_with_residual": "Графический 71879, предпросмотр",
+        "second_graphic71_without_residual": "Второе КЗ 71879, предпросмотр",
+        "second_graphic71_with_residual": "Второе КЗ 71879, предпросмотр",
     }.get(key, key)
     suffix = ("без остаточной намагниченности (K_r = 0)" if "without" in key
               else f"с остаточной намагниченностью (K_r = {k_r:g})")
@@ -102,45 +108,45 @@ with st.sidebar:
         ct_class = st.selectbox("Класс точности", PR_CLASSES)
         l2 = st.number_input("L2 — индуктивность рассеяния, Гн", min_value=0.0,
                              max_value=1.0, value=0.00182, step=0.00001, format="%.6f",
-                             help="Из паспорта/заводских данных. В примере Б.1: L2 = 0,00182 Гн.")
+                             help="Из паспорта/заводских данных. В примере Б.1: 0,00182 Гн.")
         ts_nom = st.number_input("Ts.ном — постоянная времени контура, с",
                                  min_value=0.01, max_value=10.0, value=0.507,
                                  step=0.001, format="%.3f",
-                                 help="В примере Б.1: Ts.ном = 0,507 с.")
+                                 help="В примере Б.1: 0,507 с.")
         kp_r_nom = st.number_input(
             "Kп.р.ном — коэфф. переходного режима", min_value=1.0, max_value=100.0,
             value=1.0 if ct_class in ("5PR", "10PR") else 10.0, step=1.0,
             help="Для 5PR/10PR = 1; для TPY/TPZ/TPE — по паспорту.")
         use_second_kz = st.checkbox("Второе КЗ — неуспешное АПВ (п. 5.1.6)", value=False,
-                                    help="Если АПВ на объекте отсутствует, не включайте — "
-                                         "второе КЗ рассчитываться не будет.")
+                                    help="Если АПВ нет — не включайте.")
         if use_second_kz:
             t_kz1 = st.number_input("t_кз1 — время отключения 1-го КЗ, с",
                                     min_value=0.0, max_value=5.0, value=0.1, step=0.01,
-                                    format="%.3f",
-                                    help="Полное время ликвидации первого КЗ. "
-                                         "В примере Б.1: 0,1 с.")
+                                    format="%.3f", help="В примере Б.1: 0,1 с.")
             t_bp = st.number_input("t_б.п — бестоковая пауза АПВ, с",
                                    min_value=0.0, max_value=5.0, value=1.0, step=0.05,
                                    format="%.3f",
-                                   help="Время от отключения 1-го КЗ до возникновения 2-го. "
-                                        "В примере Б.1: 1,0 с; тогда t2 = t_кз1 + t_б.п = 1,1 с.")
+                                   help="t2 = t_кз1 + t_б.п. В примере Б.1: 1,0 с.")
 
-    st.subheader("Начальная фаза θ")
-    manual_theta = st.checkbox("Задать θ вручную", value=False)
+    st.subheader("Начальная фаза")
+    manual_theta = st.checkbox("Задать угол вручную", value=False)
     theta_override = None
     if manual_theta:
-        theta_deg = st.number_input("θ, градусы", min_value=-90.0, max_value=90.0,
-                                    value=0.0, step=1.0)
+        if is_71879:
+            theta_deg = st.number_input("φкз, градусы (для 71879)",
+                                        min_value=0.0, max_value=90.0, value=0.0, step=1.0,
+                                        help="Фаза периодической составляющей. θ находится "
+                                             "из неё по формуле (14).")
+        else:
+            theta_deg = st.number_input("θ, градусы (для 58669)",
+                                        min_value=-90.0, max_value=90.0, value=0.0, step=1.0)
         theta_override = math.radians(theta_deg)
 
     st.subheader("Остаточная намагниченность")
     k_r_default = K_R_PR_DEFAULT if is_71879 else K_R_PRED
-    custom_kr = st.checkbox(
-        "Задать K_r вручную", value=False,
-        help=f"По умолчанию: {K_R_PRED} для классов по ГОСТ Р 58669-2019; "
-             f"{K_R_PR_DEFAULT} для 5PR/10PR/TPY/TPZ без паспортных данных. "
-             "В примере Б.1 — 0,085 по паспорту.")
+    custom_kr = st.checkbox("Задать K_r вручную", value=False,
+                            help=f"По умолчанию: {K_R_PRED} для 58669 (класс P); "
+                                 f"{K_R_PR_DEFAULT} для 5PR/10PR/TPY/TPZ без паспорта.")
     if custom_kr:
         k_r = st.number_input("K_r", min_value=0.0, max_value=1.0,
                               value=k_r_default, step=0.01, format="%.3f")
@@ -220,6 +226,24 @@ def chart_generic(xs, ys, xlab, ylab, title, color):
         st.line_chart(df.set_index("x"))
 
 
+def _kpr_layers(df, d_lvl, d_pt, title):
+    import altair as alt
+    base = alt.Chart(df).mark_line(strokeWidth=2).encode(
+        x=alt.X("t_ms:Q", title="Время t, мс"),
+        y=alt.Y("K_pr:Q", title="K_п.р(t)"),
+        color=alt.Color("curve:N", title="Кривая"),
+        tooltip=["t_ms:Q", "K_pr:Q", "curve:N"])
+    layers = [base, alt.Chart(d_lvl).mark_rule(strokeDash=[6, 4], color="#2ca02c",
+                                               strokeWidth=2).encode(y="lvl:Q")]
+    if not d_pt.empty:
+        layers.append(alt.Chart(d_pt).mark_rule(color="#2ca02c", strokeDash=[3, 3])
+                      .encode(x="t_ms:Q"))
+        layers.append(alt.Chart(d_pt).mark_point(size=170, filled=True,
+                                                 color="#2ca02c", stroke="black")
+                      .encode(x="t_ms:Q", y="K_pr:Q"))
+    return alt.layer(*layers).properties(title=title, height=400)
+
+
 def chart_kpr(ct_m, kz, r, eff):
     tn = r.t_nas * 1000.0 if r.t_nas is not None else None
     t_end = min(max(tn * 1.45, 20.0) if tn else max(kz.t_p * 3000.0, 40.0), 400.0)
@@ -233,27 +257,37 @@ def chart_kpr(ct_m, kz, r, eff):
     d_pt = (pd.DataFrame({"t_ms": [tn], "K_pr": [eff]}) if tn is not None
             else pd.DataFrame({"t_ms": [], "K_pr": []}))
     try:
-        import altair as alt
-        base = alt.Chart(df).mark_line(strokeWidth=2).encode(
-            x=alt.X("t_ms:Q", title="Время t, мс"),
-            y=alt.Y("K_pr:Q", title="K_п.р(t)"),
-            color=alt.Color("curve:N", title="Начальная фаза"),
-            tooltip=["t_ms:Q", "K_pr:Q", "curve:N"])
-        layers = [base, alt.Chart(d_lvl).mark_rule(strokeDash=[6, 4], color="#2ca02c",
-                                                   strokeWidth=2).encode(y="lvl:Q")]
-        if not d_pt.empty:
-            layers.append(alt.Chart(d_pt).mark_rule(color="#2ca02c", strokeDash=[3, 3])
-                          .encode(x="t_ms:Q"))
-            layers.append(alt.Chart(d_pt).mark_point(size=170, filled=True,
-                                                     color="#2ca02c", stroke="black")
-                          .encode(x="t_ms:Q", y="K_pr:Q"))
-        st.altair_chart(alt.layer(*layers).properties(
-            title=f"{kz.label} · {label} · T_p = {kz.t_p * 1000:.0f} мс", height=400))
+        st.altair_chart(_kpr_layers(df, d_lvl, d_pt,
+                                    f"{kz.label} · {label} · T_p = {kz.t_p * 1000:.0f} мс"))
     except Exception as exc:
         st.warning(f"Интерактивный график недоступен ({type(exc).__name__}).")
         st.line_chart(pd.DataFrame({label: k_star, LBL_ZERO: k_zero},
                                    index=np.round(t_ms, 3)).rename_axis("Время, мс"))
-    st.caption(f"Уровень A·(1−K_r) = {eff:.3f}; {label}; t_нас = {fmt_t(r)}.")
+    st.caption(f"Уровень A·(1−K_r) = {eff:.3f}; t_нас = {fmt_t(r)}.")
+
+
+def chart_kpr_71879(ct_m, kz, r, eff):
+    """График K'_п.р(t) по формуле (12) ГОСТ Р 71879-2024."""
+    tn = r.t_nas * 1000.0 if r.t_nas is not None else None
+    t_end = min(max(tn * 1.45, 20.0) if tn else max(kz.t_p * 3000.0, 40.0), 400.0)
+    th = r.theta_star if r.theta_star is not None else 0.0
+    ts = ts_fact_71879(ct_m)
+    t_ms, k_star = build_kpr1_curve_71879(kz.t_p, ts, th, t_end)
+    label = f"K'_п.р(t), формула (12), θ = {math.degrees(th):.1f}°"
+    df = pd.DataFrame({"t_ms": t_ms, "K_pr": k_star, "curve": [label] * len(t_ms)})
+    d_lvl = pd.DataFrame({"lvl": [eff]})
+    d_pt = (pd.DataFrame({"t_ms": [tn], "K_pr": [eff]}) if tn is not None
+            else pd.DataFrame({"t_ms": [], "K_pr": []}))
+    try:
+        st.altair_chart(_kpr_layers(df, d_lvl, d_pt,
+                                    f"{kz.label} · формула (12) · Tа = {kz.t_p * 1000:.0f} мс,"
+                                    f" Ts = {ts * 1000:.0f} мс"))
+    except Exception as exc:
+        st.warning(f"Интерактивный график недоступен ({type(exc).__name__}).")
+        st.line_chart(pd.DataFrame({label: k_star},
+                                   index=np.round(t_ms, 3)).rename_axis("Время, мс"))
+    st.caption(f"Уровень A·(1−K_r) = {eff:.3f}; t′нас = {fmt_t(r)} (предпросмотр, "
+               "сверка с Б.2 не выполнена).")
 
 
 # ---------------------------------------------------------------------------
@@ -277,8 +311,8 @@ bn_input_msg = ""
 
 with tab_chars:
     st.markdown("### Уточняющие характеристики ТТ")
-    st.caption("Используются методами по ВАХ (п. 5.3) и по характеристике намагничивания "
-               "(п. 5.4). Источники: типовая кривая, файл CSV/Excel или ручной ввод.")
+    st.caption("ВАХ (п. 5.3) и характеристика намагничивания (п. 5.4). Источники: "
+               "типовая кривая, файл CSV/Excel или ручной ввод.")
     eps_idx = 1 if (is_71879 and ct_class == "5PR") else 0
     eps = st.selectbox("Полная погрешность ε, % (класс защиты)", (10.0, 5.0), eps_idx,
                        help="10 % для 10P/10PR; 5 % для 5P/5PR. Формула (17).")
@@ -440,6 +474,11 @@ try:
                                         theta_override, k_r, eps))
             if second_active:
                 res.update(calculate_second_kz_71879(ct_m, kz, k_r, t_bp))
+            if is_71879 and method in ("graphic", "both"):
+                res.update(calculate_graphic_71879(ct_m, kz, k_r, theta_override))
+                if second_active:
+                    res.update(calculate_second_graphic_71879(ct_m, kz, k_r,
+                                                              t_kz1, t_bp, theta_override))
             results.append((ct_m, kz, res))
 except ValueError as e:
     st.error(f"Ошибка исходных данных: {e}")
@@ -480,6 +519,10 @@ with tab_res:
     st.caption("Стандарт: **" + standard_name + "** · K_r = " + f"{k_r:g}"
                + (" (вручную)" if custom_kr else " (по умолчанию)")
                + " · Итог по методу: **" + PRIMARY_NAMES.get(primary, "—") + "**.")
+    if is_71879 and method in ("graphic", "both"):
+        st.warning("Строки «предпросмотр» — формулы (12)–(14) ГОСТ Р 71879-2024: "
+                   "численная сверка с примером Б.2 ещё не выполнена, в определяющий "
+                   "вердикт они не входят.")
 
     for ct_m, kz, res in results:
         st.subheader(f"Режим: {kz.label}")
@@ -497,7 +540,9 @@ with tab_res:
         seen = set()
         for keys, _ in ((ANALYTIC_KEYS, "Аналитический"), (GRAPHIC_KEYS, "Графический"),
                         (VAH_KEYS, "По ВАХ"), (BN_KEYS, "По B(H)"),
-                        (SECOND_KZ_KEYS, "Второе КЗ (АПВ)")):
+                        (SECOND_KZ_KEYS, "Второе КЗ (АПВ)"),
+                        (GRAPHIC71_KEYS, "Графический 71879 (предпросмотр)"),
+                        (SECOND_GRAPHIC71_KEYS, "Второе КЗ 71879 (предпросмотр)")):
             present = [k for k in keys if k in res]
             if not present:
                 continue
@@ -522,6 +567,14 @@ with tab_res:
             with st.expander("📈 K_п.р(t) — " + ("без" if "without" in k else "с")
                              + " остаточной намагниченности", expanded=True):
                 chart_kpr(ct_eff, kz_eff, r, r.a * (1 - r.k_r))
+
+        for k in GRAPHIC71_KEYS:
+            r = res.get(k)
+            if r is None or r.status != ST_OK:
+                continue
+            with st.expander("📈 K'_п.р(t) по формуле (12) — предпросмотр, "
+                             + ("без" if "without" in k else "с") + " остаточной"):
+                chart_kpr_71879(ct_m, kz, r, r.a * (1 - r.k_r))
 
         if VAH_KEYS[0] in res and vah_curve_final:
             with st.expander("📈 ВАХ (использованная в расчёте)"):
@@ -551,9 +604,9 @@ with tab_res:
 with tab_check:
     @st.cache_data(show_spinner="Самопроверка…")
     def checks():
-        return (run_self_checks(), run_self_checks_71879(),
-                run_graphic_checks(), run_method_comparison())
-    (ra, oka), (r71, ok71), (rg, okg), rc = checks()
+        return (run_self_checks(), run_self_checks_71879(), run_graphic_checks(),
+                run_graphic_checks_71879(), run_method_comparison())
+    (ra, oka), (r71, ok71), (rg, okg), (rg71, okg71), rc = checks()
 
     st.markdown("#### ГОСТ Р 58669-2019 — Приложение В (В.1.1–В.1.3)")
     for ex in REFERENCE_EXAMPLES:
@@ -573,22 +626,28 @@ with tab_check:
     st.dataframe(ra, hide_index=True)
 
     st.markdown("#### ГОСТ Р 71879-2024 — Приложение Б (пример Б.1: первое и второе КЗ)")
-    st.caption("Исходные данные: I1ном=2000 А, I2ном=1 А, Kном=40, Sном=20 ВА, cos φ=0,8, "
-               "R2=6,96 Ом, L2=0,00182 Гн, Ts.ном=0,507 с, Kп.р.ном=1, K_r=0,085, "
-               "t_кз1=0,1 с, t_б.п=1,0 с; Rн=6,3/12,6 Ом; Iкз=23145/26900 А; Tа=128/180 мс. "
-               "Эталоны времени первого КЗ — по формуле (6) с K_r=0,085.")
+    st.caption("Эталоны времени первого КЗ — по формуле (6) с K_r = 0,085; второго — по (9).")
     if ok71:
         st.success("✅ Пример Б.1 воспроизведён (A, Ts, t′ и t″ — по обоим видам КЗ)")
     else:
         st.error("❌ Расхождение с примером Б.1")
     st.dataframe(r71, hide_index=True)
 
-    st.markdown("#### Свойства формулы (Г.15)")
+    st.markdown("#### Свойства формулы (Г.15) — графический метод 58669")
     if okg:
         st.success("✅ Все проверки пройдены")
     else:
-        st.error("❌ Расхождение в графическом методе")
+        st.error("❌ Расхождение в графическом методе 58669")
     st.dataframe(rg, hide_index=True)
+
+    st.markdown("#### Структурные проверки формул (12)–(14) — графический метод 71879")
+    st.caption("Числовая сверка с примером Б.2 будет добавлена после получения скана "
+               "Б.2.1–Б.2.4; до тех пор метод работает в режиме предпросмотра.")
+    if okg71:
+        st.success("✅ Структурные свойства формул (12)–(14) подтверждены")
+    else:
+        st.error("❌ Расхождение в структурных проверках (12)–(14)")
+    st.dataframe(rg71, hide_index=True)
 
     st.markdown("#### Сопоставление методов (справочно)")
     st.dataframe(rc, hide_index=True)
@@ -597,31 +656,38 @@ with tab_check:
 # Вкладка «Теория»
 # ---------------------------------------------------------------------------
 with tab_theory:
-    st.markdown("### 1. Два стандарта на время до насыщения")
-    st.markdown("**ГОСТ Р 58669-2019** — классы P, PX, TPX (K_r = 0,86).\n\n"
-                "**ГОСТ Р 71879-2024** — классы 5PR, 10PR, TPY, TPZ, TPE (K_r по паспорту, "
-                "при отсутствии — 0,1). Отличия: в z2Σ входит ω·L2; A умножается на Kп.р.ном; "
-                "T = min(T_а.экв, T_s), где T_s — фактическая постоянная времени контура.")
+    st.markdown("### 1. Каскад методов")
+    st.markdown("Аналитический (5.1) → графический по паспортным данным (5.2) → ВАХ (5.3) → "
+                "характеристика намагничивания (5.4). Итог — по самому точному из доступных.")
     st.markdown("### 2. Формулы ГОСТ Р 58669-2019")
-    st.code("A     = I1ном·Kном·z2Σном / (Iкз·z2Σ)                       (9)\n"
-            "t_нас = T_p·ln( ω·T_p / (ω·T_p + 1 − A·(1−K_r)) )          (3), (6)",
+    st.code("A     = I1ном·Kном·z2Σном / (Iкз·z2Σ)                      (9)\n"
+            "t_нас = T_p·ln( ω·T_p / (ω·T_p + 1 − A·(1−K_r)) )         (3), (6)",
             language="text")
-    st.markdown("### 3. Формулы ГОСТ Р 71879-2024 — первое КЗ")
-    st.code("A     = I1ном·Kном·Kп.р.ном·z2Σном / (Iкз·z2Σ)               (4)\n"
-            "T_s   = Ts.ном·(R2 + zн.ном·cos φном) / (R2 + Rн.факт)      (5)\n"
-            "T     = min(T_а.экв, T_s)\n"
-            "t′нас = T·ln( ω·T / (ω·T + 1 − A·(1−K_r)) )                  (6)",
+    st.markdown("### 3. Первое КЗ — ГОСТ Р 71879-2024")
+    st.code("A     = I1ном·Kном·Kп.р.ном·z2Σном / (Iкз·z2Σ)              (4)\n"
+            "T_s   = Ts.ном·(R2 + zн.ном·cos φном)/(R2 + Rн.факт)       (5)\n"
+            "T     = min(T_а.экв, T_s);  t′нас по формуле (6)",
             language="text")
-    st.markdown("### 4. Второе КЗ — неуспешное АПВ (п. 5.1.6)")
-    st.code("t2 = t_кз1 + t_б.п;\n"
-            "t″нас = T·ln( ω·T / (ω·T + 1 − A·(1−K_r) + A·e^(−(t2−t_кз1)/T_s)) )   (9)",
-            language="text")
-    st.markdown("Условия: **(10)** ω·T + 1 > A·(1−K_r) − A·e^(−(t2−t_кз1)/T_s); "
-                "**(11)** A·(1−K_r) − A·e^(−(t2−t_кз1)/T_s) > 1. "
-                "Член A·e^(−t_б.п/T_s) — остаточный поток первого КЗ, затухший за "
-                "бестоковую паузу. Второе КЗ насыщает ТТ быстрее первого. "
+    st.markdown("### 4. Второе КЗ (неуспешное АПВ) — п. 5.1.6")
+    st.code("t2 = t_кз1 + t_б.п\n"
+            "t″нас = T·ln( ω·T / (ω·T + 1 − A·(1−K_r) + A·e^(−t_б.п/T_s)) )   (9)\n"
+            "усл. (10): ω·T + 1 > A·(1−K_r) − A·e^(−t_б.п/T_s)\n"
+            "усл. (11): A·(1−K_r) − A·e^(−t_б.п/T_s) > 1", language="text")
+    st.markdown("Время второго КЗ отсчитывается **от момента его возникновения (t2)**. "
                 "Если АПВ отсутствует, второе КЗ не рассчитывается.")
-    st.markdown("### 5. Условия применимости")
+    st.markdown("### 5. Графический метод 71879 — формулы (12)–(14), предпросмотр")
+    st.code("K'_п.р(t) = ω·Ta.экв·e^(−t/Ts)·cos θ − ω·Ta.экв·cos(ωt+θ)·e^(−t/Ta.экв)\n"
+            "          + sin(ωt+θ) − sin θ·e^(−t/Ta.экв)                     (12)\n"
+            "θ = φкз − arctg(ω·Ta.экв)                                        (14)\n"
+            "K''_п.р(t) = K'_п.р(t2) + ω·Ta.экв·e^(−(t−t2)/Ts)·cos φкз\n"
+            "           − ω·Ta.экв·cos(ω(t−t2)+φкз)·e^(−(t−t2)/Ta.экв)\n"
+            "           + sin(ω(t−t2)+φкз) − sin φкз·e^(−(t−t2)/Ta.экв)       (13)",
+            language="text")
+    st.markdown("Условия: K′_п.р.(t′_нас) = A(1−K_r); K″_п.р.(t″_нас) = A(1−K_r); "
+                "если K′_п.р.(t2) ≥ A(1−K_r), то t″_нас = 0. "
+                "**Статус:** реализация дословная, но численная сверка с примером Б.2 не "
+                "выполнена — результаты в режиме предпросмотра и в вердикт не входят.")
+    st.markdown("### 6. Условия применимости")
     st.markdown("""
 | Условие | Если выполняется | Если НЕ выполняется |
 |---|---|---|
@@ -632,34 +698,32 @@ with tab_theory:
 | (I0ε/Uε)/(Iлин/Uлин) > 3 (16) | ВАХ-метод применим | ВАХ-метод неприменим |
 | B_me(H_e) ≥ 1,8 Тл (21) | B(H)-метод применим | B(H)-метод неприменим |
 """)
-    st.markdown("### 6. ВАХ и B(H): формулы и источники")
+    st.markdown("### 7. ВАХ и B(H): формулы и источники")
     st.code("ВАХ:  I0ε=(ε/100)·I2ном·Kфакт (17); U2sin=Kфакт·I2ном·z2Σ (20); A=Uε/U2sin (19)\n"
             "B(H): H_e=I0ε·w2/l (22); B_m=U2sin/(222·w2·s) (24); A=B_me/B_m (23)",
             language="text")
     st.markdown("**ВАХ** — паспорт/измерения (ГОСТ Р 70507.2-2024, п. 6.7.5, 9.17; "
                 "РД 153-34.0-35.301-2002). **B(H)** — w2, s, l из паспорта (пример В.4.1.1); "
                 "кривая — заводские данные или измерения.")
-    st.markdown("### 7. Разобранный пример В.1.1 (58669)")
-    st.markdown("A = 5,785; ωT_p = 40,21; t_нас = 0,128·ln(40,21/35,43) = **16,22 мс**.")
 
 # ---------------------------------------------------------------------------
 # Вкладка «О приложении»
 # ---------------------------------------------------------------------------
 with tab_about:
     st.markdown("""
-**Релиз 2.2.1:** раздельный ввод t_кз1 и t_б.п для второго КЗ (АПВ); момент возникновения
-второго КЗ t2 = t_кз1 + t_б.п отображается в интерфейсе и в отчёте.
+**Релиз 2.3:** графический метод ГОСТ Р 71879-2024 по формулам (12)–(14) — реализация
+дословная, в режиме **предпросмотра** (структурные самопроверки выполняются; численная
+сверка с примером Б.2 ожидает скана; в определяющий вердикт метод не входит).
 
-**Релиз 2.2:** исправлена самопроверка ГОСТ Р 71879-2024 (сценарий «с остаточной
-намагниченностью», как в эталоне Б.1); добавлено второе КЗ (неуспешное АПВ) — аналитический
-метод по формуле (9); самопроверка по Б.1.5.
-
-**Отложено на 2.3:** графическое второе КЗ (формулы 12–14; нужен чистый скан формул).
-
+**Релиз 2.2.1:** раздельный ввод t_кз1 и t_б.п.
+**Релиз 2.2:** второе КЗ (АПВ), формула (9); исправлена самопроверка 71879.
 **Ранее:** 2.1 — поддержка 71879 (первое КЗ); 2.0 — ввод ВАХ и B(H) из файла/вручную;
 1.10 — каскад методов; 1.9 — монотонная B(H), ручной K_r; 1.8 — прозрачная самопроверка;
 1.7 — метод B(H); 1.6 — метод ВАХ; 1.5 — кабель; 1.4 — графики в Word; 1.3 — графический
 метод; 1.2 — модули; 1.1 — корректная формула t_нас.
+
+**Что нужно для включения (12)–(14) в вердикт:** скан примера Б.2 (Б.2.1–Б.2.4) —
+сравним числа и решим вопрос об ограничении K'_п.р(t2) при насыщении во время первого КЗ.
 """)
 
 # === КОНЕЦ ФАЙЛА app.py ===
