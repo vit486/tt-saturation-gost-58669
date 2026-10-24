@@ -1,4 +1,4 @@
-"""Отчёт Word: все методы, каскадный вывод, графики. Релиз 2.2 (второе КЗ)."""
+"""Отчёт Word: все методы, каскадный вывод, графики. Релиз 2.2.1 (второе КЗ: t_кз1, t_б.п, t2)."""
 from __future__ import annotations
 
 import io
@@ -158,8 +158,12 @@ def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="b
             ("Kп.р.ном", f"{chain['kp_r_nom']:g}"),
         ]
         if chain.get("use_second_kz") and chain.get("t_bp") is not None:
-            rows.append(("Второе КЗ (АПВ): бестоковая пауза t_б.п",
-                         f"{chain['t_bp']:g} с"))
+            t_kz1 = chain.get("t_kz1")
+            t_bp = chain.get("t_bp")
+            t2 = (t_kz1 + t_bp) if (t_kz1 is not None and t_bp is not None) else None
+            rows.append(("Второе КЗ (АПВ): t_кз1 / t_б.п / t2",
+                         f"{t_kz1:g} / {t_bp:g} / {t2:g} с" if t2 is not None
+                         else f"— / {t_bp:g} / — с"))
     if vah_curve:
         rows.append(("ВАХ (п. 5.3)", f"{len(vah_curve['i0'])} точек"))
     if bn_data and bn_params:
