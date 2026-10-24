@@ -1,7 +1,8 @@
 """
 Эталонные примеры и самопроверка.
 - ГОСТ Р 58669-2019, Приложение В (В.1.1–В.1.3), с Поправкой ИУС 6–7, 2020;
-- ГОСТ Р 71879-2024, Приложение Б (Б.1: первое и второе КЗ).
+- ГОСТ Р 71879-2024, Приложение Б (Б.1: первое и второе КЗ);
+- структурные проверки формул (Г.15) 58669 и (12)–(14) 71879.
 """
 from __future__ import annotations
 
@@ -64,9 +65,8 @@ REFERENCE_EXAMPLES = [
 
 # ГОСТ Р 71879-2024, Приложение Б, пример Б.1 — ТРГ-УЭТМ-500 10PR 2000/1.
 # Ts.ном = 0.507 с восстановлена из результатов примера (формула 5).
-# Эталонные времена первого КЗ — по формуле (6) с K_r = 0,085
-# (сценарий «с остаточной намагниченностью»).
-# Второе КЗ: t_кз1 = 0,1 с, t_б.п = 1,0 с, t2 = 1,1 с; формула (9).
+# Эталоны времени первого КЗ — по формуле (6) с K_r = 0,085.
+# Второе КЗ: t_кз1 = 0,1 с, t_б.п = 1,0 с (t2 = 1,1 с), формула (9).
 EXAMPLE_71879_B1 = {
     "id": "Б.1", "name": "ТРГ-УЭТМ-500 10PR 2000/1 (ГОСТ Р 71879-2024)",
     "ct": dict(i1_nom=2000.0, i2_nom=1.0, k_nom=40.0, s_nom=20.0,
@@ -139,15 +139,12 @@ def run_self_checks_71879():
         ct = CTParams(**ex["ct"], r_load_fact=mode["r_load"], x_load_fact=mode["x_load"])
         kz = KZParams(mode["i_kz"], mode["t_p"], mode["label"])
         ts = ts_fact_71879(ct)
-        # Первое КЗ: эталон стандарта считает по формуле (6) с K_r = 0,085,
-        # поэтому берём сценарий «с остаточной намагниченностью».
         res = calculate(ct, kz, "analytic", None, ex["k_r"], standard="71879")
         r0 = res["with_residual"]
         a_ok = abs(r0.a - mode["a_expected"]) <= A_TOL
         ts_ok = abs(ts - mode["ts_expected_s"]) <= 0.005
         t_ok = (r0.status == ST_OK
                 and abs(r0.t_nas * 1000.0 - mode["t_expected_ms"]) <= T_TOL_MS)
-        # Второе КЗ (АПВ), формула (9): используется t_б.п = t2 − t_кз1
         res2 = calculate_second_kz_71879(ct, kz, ex["k_r"], ex["t_bp"])
         r2 = res2["second_with_residual"]
         t2_ok = (r2.status == ST_OK
@@ -168,6 +165,7 @@ def run_self_checks_71879():
 
 
 def _k_quad(t, t_p, alpha, theta, z2=1.0, n=4000):
+    """Независимая проверка (Г.15): интегрирование потокосцепления по (Г.13)."""
     rs = z2 * math.cos(alpha)
     ls = z2 * math.sin(alpha) / OMEGA
     x = np.linspace(0.0, t, n)
@@ -231,33 +229,9 @@ def run_graphic_checks():
     return rows, all_ok
 
 
-def run_method_comparison():
-    rows = []
-    for ex, mode, ct, kz in _iter_examples():
-        res = calculate(ct, kz, "both")
-        an, gr = res["without_residual"], res["graphic_without_residual"]
-        ta = an.t_nas * 1000.0 if (an.status == ST_OK and an.t_nas) else None
-        tg = gr.t_nas * 1000.0 if (gr.status == ST_OK and gr.t_nas) else None
-        if ta and tg:
-            dev = f"{(ta - tg) / tg * 100.0:+.1f}%"
-            domain = ("в области применимости (t ≥ 15 мс)" if ta >= 15.0
-                      else "вне области применимости (п. 5.1.7)")
-        else:
-            dev, domain = "—", "—"
-        rows.append({
-            "Пример": f"{ex['id']} {mode['label']}",
-            "t аналит., мс": round(ta, 2) if ta else "—",
-            "t графич., мс": round(tg, 2) if tg else "—",
-            "Отклонение аналитики": dev,
-            "θ*, град": round(math.degrees(gr.theta_star), 1) if gr.theta_star is not None else "—",
-            "Область применимости аналитики": domain,
-        })
-    return rows
-# ---------------------------------------------------------------------------
-# Структурные проверки формул (12)–(14) ГОСТ Р 71879-2024.
-# Числовая сверка с примером Б.2 будет добавлена после получения скана Б.2.
-# ---------------------------------------------------------------------------
 def run_graphic_checks_71879():
+    """Структурные проверки формул (12)–(14) ГОСТ Р 71879-2024.
+    Числовая сверка с примером Б.2 будет добавлена после получения скана."""
     from methods.gost_58669 import (
         OMEGA, ST_OK, calc_a_param, effective_ct_kz, k_pr1_71879, k_pr2_71879,
         theta_from_phi_71879, t_nas_graphic_first_71879, t_nas_graphic_second_71879,
@@ -311,5 +285,30 @@ def run_graphic_checks_71879():
                       ok2, (f"t″ = {t2c * 1000:.2f} мс от t2 при φкз = "
                             f"{math.degrees(phi2):.1f}°" if ok2 else f"статус: {why2}"))
     return rows, all_ok
+
+
+def run_method_comparison():
+    rows = []
+    for ex, mode, ct, kz in _iter_examples():
+        res = calculate(ct, kz, "both")
+        an, gr = res["without_residual"], res["graphic_without_residual"]
+        ta = an.t_nas * 1000.0 if (an.status == ST_OK and an.t_nas) else None
+        tg = gr.t_nas * 1000.0 if (gr.status == ST_OK and gr.t_nas) else None
+        if ta and tg:
+            dev = f"{(ta - tg) / tg * 100.0:+.1f}%"
+            domain = ("в области применимости (t ≥ 15 мс)" if ta >= 15.0
+                      else "вне области применимости (п. 5.1.7)")
+        else:
+            dev, domain = "—", "—"
+        rows.append({
+            "Пример": f"{ex['id']} {mode['label']}",
+            "t аналит., мс": round(ta, 2) if ta else "—",
+            "t графич., мс": round(tg, 2) if tg else "—",
+            "Отклонение аналитики": dev,
+            "θ*, град": round(math.degrees(gr.theta_star), 1) if gr.theta_star is not None else "—",
+            "Область применимости аналитики": domain,
+        })
+    return rows
+
 
 # === КОНЕЦ ФАЙЛА methods/reference_examples.py ===
