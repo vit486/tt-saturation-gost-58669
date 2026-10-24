@@ -96,6 +96,17 @@ def make_scenario_title(key, k_r):
 with st.sidebar:
     st.header("⚙️ Исходные данные")
 
+    st.subheader("Метод расчёта (п. 4.1 ГОСТ)")
+    method_label = st.radio("Метод", ["Аналитический (п. 5.1)",
+                                      "Графический по паспортным данным (п. 5.2)",
+                                      "Оба метода — сравнение"], index=2,
+                            help="Состав аналитического и графического расчётов. ВАХ, B(H) "
+                                 "и предпросмотр формул (12)–(14) включаются отдельными "
+                                 "чекбоксами ниже.")
+    method = {"Аналитический (п. 5.1)": "analytic",
+              "Графический по паспортным данным (п. 5.2)": "graphic",
+              "Оба метода — сравнение": "both"}[method_label]
+
     st.subheader("Стандарт и класс ТТ")
     standard_name = st.radio("Стандарт", STANDARD_OPTIONS, key="std")
     is_71879 = standard_name.startswith("ГОСТ Р 71879")
@@ -106,6 +117,11 @@ with st.sidebar:
     t_kz1 = t_bp = None
     if is_71879:
         ct_class = st.selectbox("Класс точности", PR_CLASSES)
+                st.caption("По п. 4.2.1 ГОСТ Р 71879-2024 поля L2 и Ts.ном нужны для всех классов "
+                   "5PR, 10PR, TPY, TPZ, TPE (пример Б.1 — ТТ 10PR: L2 = 1,82 мГн, "
+                   "Ts.ном = 0,507 с). Поле Kп.р.ном нужно только для TPY/TPZ/TPE — для "
+                   "5PR/10PR оно скрыто и принимается равным 1. Если в паспорте ТТ нет "
+                   "L2 и Ts.ном, переключитесь на расчёт по ГОСТ Р 58669-2019.")
         l2 = st.number_input("L2 — индуктивность рассеяния, Гн", min_value=0.0,
                              max_value=1.0, value=0.00182, step=0.00001, format="%.6f",
                              help="Из паспорта/заводских данных. В примере Б.1: 0,00182 Гн.")
@@ -113,10 +129,13 @@ with st.sidebar:
                                  min_value=0.01, max_value=10.0, value=0.507,
                                  step=0.001, format="%.3f",
                                  help="В примере Б.1: 0,507 с.")
-        kp_r_nom = st.number_input(
-            "Kп.р.ном — коэфф. переходного режима", min_value=1.0, max_value=100.0,
-            value=1.0 if ct_class in ("5PR", "10PR") else 10.0, step=1.0,
-            help="Для 5PR/10PR = 1; для TPY/TPZ/TPE — по паспорту.")
+        if ct_class in ("TPY", "TPZ", "TPE"):
+            kp_r_nom = st.number_input(
+                "Kп.р.ном — коэфф. переходного режима", min_value=1.0, max_value=100.0,
+                value=10.0, step=1.0,
+                help="Только для TPY/TPZ/TPE (п. 4.2.1); для 5PR/10PR принимается равным 1.")
+        else:
+            kp_r_nom = 1.0
         use_second_kz = st.checkbox("Второе КЗ — неуспешное АПВ (п. 5.1.6)", value=False,
                                     help="Если АПВ нет — не включайте.")
         if use_second_kz:
