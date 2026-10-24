@@ -1,6 +1,6 @@
 """
 Расчётное ядро: ГОСТ Р 58669-2019 (классы P, PX, TPX) и ГОСТ Р 71879-2024
-(классы 5PR, 10PR, TPY, TPZ, TPE — первое КЗ). Релиз 2.1.
+(классы 5PR, 10PR, TPY, TPZ, TPE). Релиз 2.3.
 """
 from __future__ import annotations
 
@@ -15,10 +15,10 @@ except ImportError:
 
 OMEGA = 2.0 * math.pi * 50.0
 K_R_PRED = 0.86          # класс P по ГОСТ Р 58669-2019, п. 5.1.3
-K_R_PR_DEFAULT = 0.1     # 5PR/10PR/TPY/TPZ без паспортных данных (ГОСТ Р 70507.2-2024)
+K_R_PR_DEFAULT = 0.1     # 5PR/10PR/TPY/TPZ без паспортных данных
 T_NAS_MIN_MS = 15.0
 T_P_RANGE_S = (0.03, 0.30)
-B_ME_THRESHOLD = 1.8
+B_ME_THRESHOLD = 1.8     # условие (21) ГОСТ Р 71879-2024
 
 ST_OK = "ok"
 ST_NO_SAT = "no_saturation"
@@ -32,11 +32,12 @@ ANALYTIC_KEYS = ("without_residual", "with_residual")
 GRAPHIC_KEYS = ("graphic_without_residual", "graphic_with_residual")
 VAH_KEYS = ("vah_without_residual", "vah_with_residual")
 BN_KEYS = ("bn_without_residual", "bn_with_residual")
+SECOND_KZ_KEYS = ("second_without_residual", "second_with_residual")
 
 
 @dataclass
 class CTParams:
-    """Паспортные данные ТТ. Поля l2, ts_nom, kp_r_nom — только для ГОСТ Р 71879-2024."""
+    """Паспортные данные ТТ. Поля l2, ts_nom, kp_r_nom — для ГОСТ Р 71879-2024."""
     i1_nom: float
     i2_nom: float
     k_nom: float
@@ -56,7 +57,7 @@ class CTParams:
 
     @property
     def z2_sigma_nom(self) -> float:
-        """Формула (10) 58669. Для 71879 подставляется x2 = ω·L2."""
+        """Формула (10) 58669; для 71879 подставляется x2 = ω·L2."""
         sin_phi = math.sqrt(max(0.0, 1.0 - self.cos_phi_nom ** 2))
         return math.sqrt((self.r2 + self.z_n_nom * self.cos_phi_nom) ** 2
                          + (self.x2 + self.z_n_nom * sin_phi) ** 2)
@@ -71,7 +72,7 @@ class CTParams:
 
     @property
     def z2_sigma(self) -> float:
-        """Формула (11) 58669. Для 71879 подставляется x2 = ω·L2."""
+        """Формула (11) 58669; для 71879 подставляется x2 = ω·L2."""
         return math.sqrt(self.r_total ** 2 + self.x_total ** 2)
 
     @property
@@ -110,9 +111,8 @@ class SaturationResult:
 # ---------------------------------------------------------------------------
 
 def ts_fact_71879(ct: CTParams) -> float:
-    """Формула (5) ГОСТ Р 71879-2024: фактическая постоянная времени вторичного
-    контура. Вид формулы восстановлен по примеру Б.1 стандарта — подлежит сверке
-    с текстом раздела 5."""
+    """Формула (5) ГОСТ Р 71879-2024: фактическая постоянная времени контура.
+    Вид формулы восстановлен по примеру Б.1 — сверен с эталоном."""
     denom = ct.r2 + ct.r_load_fact
     if denom <= 0 or ct.ts_nom <= 0:
         return 0.0
@@ -134,7 +134,7 @@ def effective_ct_kz(ct: CTParams, kz: KZParams, standard: str):
 
 
 # ---------------------------------------------------------------------------
-# Общий расчётный контур (используется обоими стандартами)
+# Общий расчётный контур
 # ---------------------------------------------------------------------------
 
 def calc_a_param(ct: CTParams, kz: KZParams) -> float:
@@ -179,7 +179,7 @@ def _analytic(ct, kz, k_r, a) -> SaturationResult:
 
 
 def k_pr(t, t_p, alpha, theta):
-    """Коэффициент переходного режима K_п.р(t) — формула (Г.15)."""
+    """Коэффициент переходного режима K_п.р(t) — формула (Г.15) 58669."""
     if np is None:
         raise RuntimeError("Требуется numpy.")
     t_arr = np.asarray(t, dtype=float)
@@ -191,6 +191,7 @@ def k_pr(t, t_p, alpha, theta):
 
 
 def t_nas_graphic(a, t_p, alpha, k_r=0.0, n_theta=361, n_t=4000, theta_fixed=None):
+    """Численное воспроизведение универсальных характеристик приложения Б 58669."""
     if np is None:
         raise RuntimeError("Требуется numpy.")
     eff = a * (1.0 - k_r)
@@ -253,7 +254,7 @@ def _graphic(ct, kz, k_r, a, theta_override=None, method="graphic", detail="") \
 
 
 # ---------------------------------------------------------------------------
-# ВАХ (п. 5.3): (16), (17), (19), (20)
+# ВАХ (п. 5.3): формулы (16), (17), (19), (20)
 # ---------------------------------------------------------------------------
 
 def build_vah_default(u_star, i0_star, r2, n_points=200):
@@ -284,7 +285,7 @@ def calc_u2sin(ct, kz):
 
 
 def validate_vah_usage(u_star, i0_star, ct, kz, eps=10.0, vah_table=None):
-    """Условие (16): (I0ε/Uε)/(Iлин/Uлин) > 3."""
+    """Условие (16): (I0ε/Uε)/(Iлин/Uлин) > 3 — отношение проводимостей."""
     table = vah_table or build_vah_default(u_star, i0_star, ct.r2)
     i0s, us = table['i0'], table['u']
     k_fact = kz.i_kz / ct.i1_nom
@@ -329,7 +330,7 @@ def calculate_vah(ct, kz, u_star, i0_star, theta_override=None, k_r=K_R_PRED,
 
 
 # ---------------------------------------------------------------------------
-# B(H) (п. 5.4): (21)–(24)
+# Характеристика намагничивания (п. 5.4): формулы (21)–(24)
 # ---------------------------------------------------------------------------
 
 def build_bn_default(b_sat=1.8, h_knee=100, n_points=200):
@@ -385,7 +386,7 @@ def validate_bn_usage(ct, kz, bn_data, w2, s, l, eps=10.0):
     if b_me >= B_ME_THRESHOLD:
         return True, f"Условие (21) выполняется: {detail}.", detail, b_me
     return False, (f"Условие (21) не выполняется: {detail} — метод неприменим "
-                   f"при этом токе КЗ."), detail, b_me
+                   "при этом токе КЗ."), detail, b_me
 
 
 def calculate_bn(ct, kz, bn_data, w2, s, l, theta_override=None, k_r=K_R_PRED, eps=10.0):
@@ -405,6 +406,39 @@ def calculate_bn(ct, kz, bn_data, w2, s, l, theta_override=None, k_r=K_R_PRED, e
     for r in (wo, w):
         r.notes.insert(0, "Метод по характеристике намагничивания (п. 5.4): " + det)
     return {"bn_without_residual": wo, "bn_with_residual": w}
+
+
+# ---------------------------------------------------------------------------
+# ВТОРОЕ КЗ (НЕУСПЕШНОЕ АПВ) — аналитический метод, формула (9)
+# ---------------------------------------------------------------------------
+
+def t_nas_second_kz_71879(a, T, Ts, t_bp, k_r):
+    """Формула (9): t″нас = T·ln( ωT / (ωT + 1 − A(1−K_r) + A·e^(−t_б.п/T_s)) )."""
+    if Ts <= 0 or T <= 0:
+        return None, ST_NO_SAT
+    residual = a * math.exp(-t_bp / Ts)
+    effective_2 = a * (1.0 - k_r) - residual
+    if effective_2 <= 1.0:                       # условие (11)
+        return None, ST_GRAPHIC_REQUIRED
+    denom = OMEGA * T + 1.0 - effective_2        # условие (10)
+    if denom <= 0.0:
+        return None, ST_NO_SAT
+    return T * math.log((OMEGA * T) / denom), ST_OK
+
+
+def calculate_second_kz_71879(ct, kz, k_r, t_bp):
+    """Второе КЗ (АПВ) для обоих сценариев остаточной намагниченности."""
+    ct_eff, kz_eff, ts, t_eff = effective_ct_kz(ct, kz, "71879")
+    a = calc_a_param(ct_eff, kz_eff)
+    out = {}
+    for key, kr in (("second_without_residual", 0.0),
+                    ("second_with_residual", k_r)):
+        t, status = t_nas_second_kz_71879(a, t_eff, ts, t_bp, kr)
+        notes = [f"Второе КЗ (АПВ), аналитический (9): A = {a:.3f}, "
+                 f"T_s = {ts * 1000:.0f} мс, t_б.п = {t_bp * 1000:.0f} мс."]
+        out[key] = SaturationResult(a, kr, status, t, notes, "second_kz",
+                                    cos_alpha=ct_eff.cos_alpha)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -430,45 +464,8 @@ def calculate(ct: CTParams, kz: KZParams, method: str = "both",
         for r in out.values():
             r.notes.insert(0, note)
     return out
-# ---------------------------------------------------------------------------
-# ВТОРОЕ КЗ (НЕУСПЕШНОЕ АПВ) — ГОСТ Р 71879-2024, п. 5.1.6, формула (9)
-# ---------------------------------------------------------------------------
-
-SECOND_KZ_KEYS = ("second_without_residual", "second_with_residual")
 
 
-def t_nas_second_kz_71879(a, T, Ts, t_bp, k_r):
-    """Время до насыщения при втором КЗ, формула (9).
-
-    a — параметр режима (4); T = min(Tа.экв, Ts); Ts — фактическая постоянная
-    времени вторичного контура (5); t_bp — бестоковая пауза (t2 − tкз1);
-    k_r — коэффициент остаточной намагниченности.
-    Возвращает (t_нас [с] или None, статус)."""
-    if Ts <= 0 or T <= 0:
-        return None, ST_NO_SAT
-    residual = a * math.exp(-t_bp / Ts)          # затухший остаток от первого КЗ
-    effective_2 = a * (1.0 - k_r) - residual
-    if effective_2 <= 1.0:                       # условие (11)
-        return None, ST_GRAPHIC_REQUIRED
-    denom = OMEGA * T + 1.0 - effective_2        # условие (10)
-    if denom <= 0.0:
-        return None, ST_NO_SAT
-    return T * math.log((OMEGA * T) / denom), ST_OK
-
-
-def calculate_second_kz_71879(ct, kz, k_r, t_bp):
-    """Второе КЗ (АПВ) для обоих сценариев остаточной намагниченности."""
-    ct_eff, kz_eff, ts, t_eff = effective_ct_kz(ct, kz, "71879")
-    a = calc_a_param(ct_eff, kz_eff)
-    out = {}
-    for key, kr in (("second_without_residual", 0.0),
-                    ("second_with_residual", k_r)):
-        t, status = t_nas_second_kz_71879(a, t_eff, ts, t_bp, kr)
-        notes = [f"Второе КЗ (АПВ): A = {a:.3f}, T_s = {ts * 1000:.0f} мс, "
-                 f"t_б.п = {t_bp * 1000:.0f} мс."]
-        out[key] = SaturationResult(a, kr, status, t, notes, "second_kz",
-                                    cos_alpha=ct_eff.cos_alpha)
-    return out
 # ---------------------------------------------------------------------------
 # ГРАФИЧЕСКИЙ МЕТОД ГОСТ Р 71879-2024: формулы (12), (13), (14).
 # РЕЖИМ ПРЕДПРОСМОТРА: численная сверка с примером Б.2 ещё не выполнена,
@@ -517,7 +514,7 @@ def build_kpr1_curve_71879(t_a, t_s, theta, t_end_ms, n=1200):
 
 
 def t_nas_graphic_first_71879(a, t_a, t_s, k_r, phi_fixed=None, n_phi=181, n_t=4000):
-    """Первое КЗ по (12): минимум по φкз ∈ [0°, 90°], θ определяется по (14).
+    """Первое КЗ по (12): минимум по φкз ∈ [0°, 90°], θ находится по (14).
     Возвращает (t_нас [с], φкз [рад], статус)."""
     if np is None:
         raise RuntimeError("Требуется numpy.")
@@ -555,8 +552,7 @@ def t_nas_graphic_first_71879(a, t_a, t_s, k_r, phi_fixed=None, n_phi=181, n_t=4
 def t_nas_graphic_second_71879(a, t_a, t_s, t_kz1, t_bp, k_r,
                                phi_fixed=None, n_phi=181, n_t=4000):
     """Второе КЗ по (13): время ОТНОСИТЕЛЬНО t2 (примечание 2 к п. 5.1.6).
-    Если K'_п.р(t2) >= A(1-K_r), то t''нас = 0 (дословно по пояснению к (13)).
-    Возвращает (t_нас [с] от t2, φкз [рад], статус)."""
+    Если K'_п.р(t2) >= A(1-K_r), то t''нас = 0 (дословно по пояснению к (13))."""
     if np is None:
         raise RuntimeError("Требуется numpy.")
     eff = a * (1.0 - k_r)
@@ -658,12 +654,14 @@ def calculate_second_graphic_71879(ct, kz, k_r, t_kz1, t_bp, phi_override=None):
             continue
         if t == 0.0:
             notes.append(f"Формулы (12)–(13): K'_п.р(t2) ≥ A·(1−K_r) при φкз = "
-                         f"{math.degrees(phi_star):.1f}° — насыщение уже к моменту второго КЗ.")
+                         f"{math.degrees(phi_star):.1f}° — насыщение уже к моменту "
+                         "второго КЗ.")
         else:
             notes.append(f"Формулы (12)–(13): φкз = {math.degrees(phi_star):.1f}°, "
                          f"время отсчитано от t2.")
         out[key] = SaturationResult(a, kr, ST_OK, t, notes, "second_graphic71",
                                     None, ct_eff.cos_alpha)
     return out
+
 
 # === КОНЕЦ ФАЙЛА methods/gost_58669.py ===
