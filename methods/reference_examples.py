@@ -253,6 +253,63 @@ def run_method_comparison():
             "Область применимости аналитики": domain,
         })
     return rows
+# ---------------------------------------------------------------------------
+# Структурные проверки формул (12)–(14) ГОСТ Р 71879-2024.
+# Числовая сверка с примером Б.2 будет добавлена после получения скана Б.2.
+# ---------------------------------------------------------------------------
+def run_graphic_checks_71879():
+    from methods.gost_58669 import (
+        OMEGA, ST_OK, calc_a_param, effective_ct_kz, k_pr1_71879, k_pr2_71879,
+        theta_from_phi_71879, t_nas_graphic_first_71879, t_nas_graphic_second_71879,
+    )
+    rows = []
 
+    def add(name, ok, detail):
+        rows.append({"Проверка": name, "Результат": detail,
+                     "Статус": "✅" if ok else "❌"})
+        return bool(ok)
+
+    all_ok = True
+
+    m = max(abs(float(k_pr1_71879(0.0, Ta, Ts, th)))
+            for Ta, Ts in ((0.128, 0.878), (0.18, 0.595), (0.05, 0.30))
+            for th in (-1.2, 0.0, 0.7))
+    all_ok &= add("Формула (12): K'_п.р(0) = 0 при любой θ", m < 1e-12,
+                  f"max |K'(0)| = {m:.1e}")
+
+    m = 0.0
+    for t in (0.005, 0.02, 0.07):
+        for th in (-0.9, 0.4):
+            m = max(m, abs(float(k_pr1_71879(t, 0.128, 0.878, th))
+                           + float(k_pr1_71879(t, 0.128, 0.878, th + math.pi))))
+    all_ok &= add("Симметрия (12): K'(θ+π) = −K'(θ)", m < 1e-12, f"max |Δ| = {m:.1e}")
+
+    t2 = 1.1
+    k1v = float(k_pr1_71879(t2, 0.128, 0.878, 0.35))
+    m = abs(float(k_pr2_71879(t2, t2, 0.128, 0.878, 0.8, k1v)) - k1v)
+    all_ok &= add("Непрерывность (13): K''(t2) = K'(t2)", m < 1e-12, f"|Δ| = {m:.1e}")
+
+    m = abs(theta_from_phi_71879(math.atan(OMEGA * 0.128), 0.128))
+    all_ok &= add("Соотношение (14): θ = φкз − arctg(ω·Ta)", m < 1e-12,
+                  f"|Δ| = {m:.1e}")
+
+    ex = EXAMPLE_71879_B1
+    for mode in ex["modes"]:
+        ct = CTParams(**ex["ct"], r_load_fact=mode["r_load"], x_load_fact=mode["x_load"])
+        kz = KZParams(mode["i_kz"], mode["t_p"], mode["label"])
+        cte, kze, ts, _ = effective_ct_kz(ct, kz, "71879")
+        a = calc_a_param(cte, kze)
+        t1c, phi1, why1 = t_nas_graphic_first_71879(a, kz.t_p, ts, ex["k_r"])
+        ok1 = why1 == ST_OK and t1c is not None and 0.0 < t1c < 0.5
+        all_ok &= add(f"Первое КЗ ({mode['label']}): решение по (12) существует",
+                      ok1, (f"t′ = {t1c * 1000:.2f} мс при φкз = {math.degrees(phi1):.1f}°"
+                            if ok1 else f"статус: {why1}"))
+        t2c, phi2, why2 = t_nas_graphic_second_71879(a, kz.t_p, ts,
+                                                     ex["t_kz1"], ex["t_bp"], ex["k_r"])
+        ok2 = why2 == ST_OK and t2c is not None and t2c >= 0.0
+        all_ok &= add(f"Второе КЗ ({mode['label']}): решение по (13) существует",
+                      ok2, (f"t″ = {t2c * 1000:.2f} мс от t2 при φкз = "
+                            f"{math.degrees(phi2):.1f}°" if ok2 else f"статус: {why2}"))
+    return rows, all_ok
 
 # === КОНЕЦ ФАЙЛА methods/reference_examples.py ===
