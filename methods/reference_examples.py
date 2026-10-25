@@ -276,6 +276,10 @@ def run_graphic_checks_71879():
     k1v = float(k_pr1_71879(t2, r_sum, l_sum, t_a, t_s, 0.5))
     m = abs(float(k_pr2_71879(t2, t2, r_sum, l_sum, t_a, t_s, 0.9, k1v)) - k1v)
     all_ok &= add("Непрерывность (13): K″(t2) = K′(t2)", m < 1e-12, f"|Δ| = {m:.1e}")
+
+    m = abs(float(k_pr1_71879(0.05, 13.26, 0.0, t_a, t_s, 0.4))
+            - float(k_pr1_71879(0.05, 13.26, 1e-12, t_a, t_s, 0.4)))
+    all_ok &= add("Устойчивость (12) при LΣ → 0", m < 1e-6, f"|Δ| = {m:.1e}")
     return rows, all_ok
 
 
