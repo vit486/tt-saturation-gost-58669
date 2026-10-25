@@ -131,7 +131,8 @@ def _method_rows(res, keys, k_r, name_prefix):
 
 
 def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="both",
-                 vah_curve=None, bn_data=None, bn_params=None, k_r=K_R_PRED, eps=10.0):
+                 vah_curve=None, bn_data=None, bn_params=None, k_r=K_R_PRED, eps=10.0,
+                 second_kz_min_ms=None):
     is_71879 = "ct_class" in chain
     standard = "71879" if is_71879 else "58669"
     doc = Document()
@@ -257,10 +258,24 @@ def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="b
         except Exception as e:
             doc.add_paragraph(f"(График B(H) не построен: {type(e).__name__}.)")
 
-    doc.add_heading("Сводка по всем методам и итоговая оценка", level=1)
+        doc.add_heading("Сводка по всем методам и итоговая оценка", level=1)
     rows, _, lines, primary = build_summary(results, bool(vah_curve), bool(bn_data), t_req_ms)
     _table(doc, ["Метод", "Статус", "t_нас, мс", "Пояснение"],
            [(r["Метод"], r["Статус"], r["t_нас, мс"], r["Пояснение"]) for r in rows])
+
+    # Добавляем строку про второе КЗ, если она есть
+    if second_kz_min_ms is not None:
+        t2 = chain.get("t_kz1") + chain.get("t_bp") if (chain.get("t_kz1") is not None and chain.get("t_bp") is not None) else None
+        t2_note = (f" (t2 = {t2:.2f} с)" if t2 is not None else "")
+        g_note = "графический, формула (13)" if is_71879 else "аналитический, формула (9)"
+        if t_req_ms > 0 and second_kz_min_ms < t_req_ms:
+            lines.append(f"Второе КЗ (АПВ){t2_note}: наименьшее t″нас = "
+                         f"{second_kz_min_ms:.2f} мс ({g_note}) < требуемого "
+                         f"{t_req_ms:g} мс — условие НЕ выполняется.")
+        else:
+            lines.append(f"Второе КЗ (АПВ){t2_note}: наименьшее t″нас = "
+                         f"{second_kz_min_ms:.2f} мс ({g_note}).")
+
     label = {"success": "ТТ проходит проверку.",
              "warning": "Требуется уточнение.",
              "danger": "ТТ проверку не проходит."}.get(verdict, "")
