@@ -1,8 +1,9 @@
 """
 Эталонные примеры и самопроверка.
 - ГОСТ Р 58669-2019, Приложение В (В.1.1–В.1.3), с Поправкой ИУС 6–7, 2020;
-- ГОСТ Р 71879-2024, Приложение Б (Б.1: первое и второе КЗ);
-- структурные проверки формул (Г.15) 58669 и (12)–(14) 71879.
+- ГОСТ Р 71879-2024, Приложение Б: Б.1 (аналитика), Б.2 (графический метод,
+  формулы 12/13, допуск ±1,2 мс на чтение с графика);
+- структурные проверки формул (Г.15) 58669 и (12)–(13) 71879.
 """
 from __future__ import annotations
 
@@ -14,11 +15,13 @@ _TRAPEZOID = getattr(np, "trapezoid", None) or getattr(np, "trapz")
 
 from methods.gost_58669 import (
     CTParams, KZParams, K_R_PRED, OMEGA, ST_GRAPHIC_REQUIRED, ST_NO_SAT, ST_OK,
-    calculate, calculate_second_kz_71879, k_pr, t_nas_graphic, ts_fact_71879,
+    calculate, calculate_second_graphic_71879, calculate_second_kz_71879,
+    k_pr, k_pr1_71879, k_pr2_71879, t_nas_graphic, ts_fact_71879,
 )
 
 A_TOL = 0.02
 T_TOL_MS = 0.2
+T_GRAPH_TOL_MS = 1.2   # эталоны Б.2 читаются с графика
 
 REFERENCE_EXAMPLES = [
     {
@@ -63,12 +66,13 @@ REFERENCE_EXAMPLES = [
     },
 ]
 
-# ГОСТ Р 71879-2024, Приложение Б, пример Б.1 — ТРГ-УЭТМ-500 10PR 2000/1.
-# Ts.ном = 0.507 с восстановлена из результатов примера (формула 5).
-# Эталоны времени первого КЗ — по формуле (6) с K_r = 0,085.
-# Второе КЗ: t_кз1 = 0,1 с, t_б.п = 1,0 с (t2 = 1,1 с), формула (9).
+# ГОСТ Р 71879-2024, Приложение Б — ТРГ-УЭТМ-500 10PR 2000/1.
+# Б.1: аналитика (формулы 4–9). Б.2: графический метод (формулы 12–13):
+#   первое КЗ — φкз = 10° (3ф) / 30° (1ф), эталоны 25,5 мс и 10 мс
+#   (в сводной таблице Б.1 указано 10,9; допуск ±1,2 мс накрывает оба чтения);
+#   второе КЗ — φкз = 30° (3ф) / 40° (1ф), эталоны 10,9 мс и 8,6 мс.
 EXAMPLE_71879_B1 = {
-    "id": "Б.1", "name": "ТРГ-УЭТМ-500 10PR 2000/1 (ГОСТ Р 71879-2024)",
+    "id": "Б.1/Б.2", "name": "ТРГ-УЭТМ-500 10PR 2000/1 (ГОСТ Р 71879-2024)",
     "ct": dict(i1_nom=2000.0, i2_nom=1.0, k_nom=40.0, s_nom=20.0,
                cos_phi_nom=0.8, r2=6.96, x2=0.0,
                l2=0.00182, ts_nom=0.507, kp_r_nom=1.0),
@@ -79,11 +83,13 @@ EXAMPLE_71879_B1 = {
         {"label": "трёхфазное КЗ", "i_kz": 23145.0, "t_p": 0.128,
          "r_load": 6.3, "x_load": 0.0, "a_expected": 6.82,
          "ts_expected_s": 0.878, "t_expected_ms": 17.87,
-         "t_second_expected_ms": 10.12},
+         "t_second_expected_ms": 10.12,
+         "t_graph_expected_ms": 25.5, "t_graph2_expected_ms": 10.9},
         {"label": "однофазное КЗ", "i_kz": 26900.0, "t_p": 0.180,
          "r_load": 12.6, "x_load": 0.0, "a_expected": 3.97,
          "ts_expected_s": 0.595, "t_expected_ms": 8.61,
-         "t_second_expected_ms": 6.15},
+         "t_second_expected_ms": 6.15,
+         "t_graph_expected_ms": 10.0, "t_graph2_expected_ms": 8.6},
     ],
 }
 
@@ -132,33 +138,49 @@ def run_self_checks():
 
 
 def run_self_checks_71879():
-    """Самопроверка по примеру Б.1 ГОСТ Р 71879-2024 (первое и второе КЗ)."""
+    """Эталоны Б.1 (аналитика) и Б.2 (графический метод) ГОСТ Р 71879-2024."""
     ex = EXAMPLE_71879_B1
     rows, all_ok = [], True
     for mode in ex["modes"]:
         ct = CTParams(**ex["ct"], r_load_fact=mode["r_load"], x_load_fact=mode["x_load"])
         kz = KZParams(mode["i_kz"], mode["t_p"], mode["label"])
         ts = ts_fact_71879(ct)
+        # Аналитика: первое КЗ (6), второе КЗ (9) — сценарий «с остаточной»
         res = calculate(ct, kz, "analytic", None, ex["k_r"], standard="71879")
         r0 = res["with_residual"]
+        res2 = calculate_second_kz_71879(ct, kz, ex["k_r"], ex["t_bp"])
+        r2 = res2["second_with_residual"]
+        # Графический метод: первое КЗ (12), второе КЗ (13)
+        gres = calculate(ct, kz, "graphic", None, ex["k_r"], standard="71879")
+        g0 = gres["graphic_with_residual"]
+        g2res = calculate_second_graphic_71879(ct, kz, ex["k_r"],
+                                               ex["t_kz1"], ex["t_bp"])
+        g2 = g2res["second_graphic_with_residual"]
+
         a_ok = abs(r0.a - mode["a_expected"]) <= A_TOL
         ts_ok = abs(ts - mode["ts_expected_s"]) <= 0.005
         t_ok = (r0.status == ST_OK
                 and abs(r0.t_nas * 1000.0 - mode["t_expected_ms"]) <= T_TOL_MS)
-        res2 = calculate_second_kz_71879(ct, kz, ex["k_r"], ex["t_bp"])
-        r2 = res2["second_with_residual"]
         t2_ok = (r2.status == ST_OK
                  and abs(r2.t_nas * 1000.0 - mode["t_second_expected_ms"]) <= T_TOL_MS)
-        ok = bool(a_ok and ts_ok and t_ok and t2_ok)
+        g_ok = (g0.status == ST_OK
+                and abs(g0.t_nas * 1000.0 - mode["t_graph_expected_ms"]) <= T_GRAPH_TOL_MS)
+        g2_ok = (g2.status == ST_OK
+                 and abs(g2.t_nas * 1000.0 - mode["t_graph2_expected_ms"]) <= T_GRAPH_TOL_MS)
+        ok = bool(a_ok and ts_ok and t_ok and t2_ok and g_ok and g2_ok)
         all_ok = all_ok and ok
         rows.append({
             "Режим": mode["label"],
-            "A эталон": mode["a_expected"], "A расчёт": round(float(r0.a), 3),
-            "Ts эталон, с": mode["ts_expected_s"], "Ts расчёт, с": round(float(ts), 3),
-            "t′ эталон, мс": mode["t_expected_ms"],
-            "t′ расчёт, мс": round(float(r0.t_nas * 1000.0), 2) if r0.status == ST_OK else "—",
-            "t″ эталон, мс": mode["t_second_expected_ms"],
-            "t″ расчёт, мс": round(float(r2.t_nas * 1000.0), 2) if r2.status == ST_OK else "—",
+            "A эталон / расчёт": f"{mode['a_expected']} / {r0.a:.3f}",
+            "Ts эталон / расчёт, с": f"{mode['ts_expected_s']} / {ts:.3f}",
+            "t′ аналитика, мс": f"{mode['t_expected_ms']} / "
+                                + (f"{r0.t_nas * 1000:.2f}" if r0.status == ST_OK else "—"),
+            "t″ аналитика, мс": f"{mode['t_second_expected_ms']} / "
+                                + (f"{r2.t_nas * 1000:.2f}" if r2.status == ST_OK else "—"),
+            "t′ графич. (Б.2.2), мс": f"{mode['t_graph_expected_ms']} / "
+                                + (f"{g0.t_nas * 1000:.2f}" if g0.status == ST_OK else "—"),
+            "t″ графич. (Б.2.3), мс": f"{mode['t_graph2_expected_ms']} / "
+                                + (f"{g2.t_nas * 1000:.2f}" if g2.status == ST_OK else "—"),
             "Статус": "✅" if ok else "❌",
         })
     return rows, all_ok
@@ -230,12 +252,7 @@ def run_graphic_checks():
 
 
 def run_graphic_checks_71879():
-    """Структурные проверки формул (12)–(14) ГОСТ Р 71879-2024.
-    Числовая сверка с примером Б.2 будет добавлена после получения скана."""
-    from methods.gost_58669 import (
-        OMEGA, ST_OK, calc_a_param, effective_ct_kz, k_pr1_71879, k_pr2_71879,
-        theta_from_phi_71879, t_nas_graphic_first_71879, t_nas_graphic_second_71879,
-    )
+    """Структурные проверки формул (12)–(13) ГОСТ Р 71879-2024."""
     rows = []
 
     def add(name, ok, detail):
@@ -244,46 +261,30 @@ def run_graphic_checks_71879():
         return bool(ok)
 
     all_ok = True
+    r_sum, l_sum = 13.26, 0.00182
+    t_a, t_s = 0.128, 0.878
 
-    m = max(abs(float(k_pr1_71879(0.0, Ta, Ts, th)))
-            for Ta, Ts in ((0.128, 0.878), (0.18, 0.595), (0.05, 0.30))
-            for th in (-1.2, 0.0, 0.7))
-    all_ok &= add("Формула (12): K'_п.р(0) = 0 при любой θ", m < 1e-12,
-                  f"max |K'(0)| = {m:.1e}")
+    m = max(abs(float(k_pr1_71879(0.0, r_sum, l_sum, t_a, t_s, phi)))
+            for phi in (-1.2, 0.0, 0.5, 1.4))
+    all_ok &= add("Формула (12): K′п.р(0) = 0 при любой φкз", m < 1e-12,
+                  f"max |K′(0)| = {m:.1e}")
 
     m = 0.0
     for t in (0.005, 0.02, 0.07):
-        for th in (-0.9, 0.4):
-            m = max(m, abs(float(k_pr1_71879(t, 0.128, 0.878, th))
-                           + float(k_pr1_71879(t, 0.128, 0.878, th + math.pi))))
-    all_ok &= add("Симметрия (12): K'(θ+π) = −K'(θ)", m < 1e-12, f"max |Δ| = {m:.1e}")
+        for phi in (0.3, -0.8):
+            m = max(m, abs(float(k_pr1_71879(t, r_sum, l_sum, t_a, t_s, phi))
+                           + float(k_pr1_71879(t, r_sum, l_sum, t_a, t_s, phi + math.pi))))
+    all_ok &= add("Симметрия (12): K′(φ+π) = −K′(φ)", m < 1e-10, f"max |Δ| = {m:.1e}")
 
     t2 = 1.1
-    k1v = float(k_pr1_71879(t2, 0.128, 0.878, 0.35))
-    m = abs(float(k_pr2_71879(t2, t2, 0.128, 0.878, 0.8, k1v)) - k1v)
-    all_ok &= add("Непрерывность (13): K''(t2) = K'(t2)", m < 1e-12, f"|Δ| = {m:.1e}")
+    k1v = float(k_pr1_71879(t2, r_sum, l_sum, t_a, t_s, 0.5))
+    m = abs(float(k_pr2_71879(t2, t2, r_sum, l_sum, t_a, t_s, 0.9, k1v)) - k1v)
+    all_ok &= add("Непрерывность (13): K″(t2) = K′(t2)", m < 1e-12, f"|Δ| = {m:.1e}")
 
-    m = abs(theta_from_phi_71879(math.atan(OMEGA * 0.128), 0.128))
-    all_ok &= add("Соотношение (14): θ = φкз − arctg(ω·Ta)", m < 1e-12,
-                  f"|Δ| = {m:.1e}")
+    m = abs(float(k_pr1_71879(0.05, 13.26, 0.0, t_a, t_s, 0.4))
+            - float(k_pr1_71879(0.05, 13.26, 1e-12, t_a, t_s, 0.4)))
+    all_ok &= add("Устойчивость (12) при LΣ → 0", m < 1e-6, f"|Δ| = {m:.1e}")
 
-    ex = EXAMPLE_71879_B1
-    for mode in ex["modes"]:
-        ct = CTParams(**ex["ct"], r_load_fact=mode["r_load"], x_load_fact=mode["x_load"])
-        kz = KZParams(mode["i_kz"], mode["t_p"], mode["label"])
-        cte, kze, ts, _ = effective_ct_kz(ct, kz, "71879")
-        a = calc_a_param(cte, kze)
-        t1c, phi1, why1 = t_nas_graphic_first_71879(a, kz.t_p, ts, ex["k_r"])
-        ok1 = why1 == ST_OK and t1c is not None and 0.0 < t1c < 0.5
-        all_ok &= add(f"Первое КЗ ({mode['label']}): решение по (12) существует",
-                      ok1, (f"t′ = {t1c * 1000:.2f} мс при φкз = {math.degrees(phi1):.1f}°"
-                            if ok1 else f"статус: {why1}"))
-        t2c, phi2, why2 = t_nas_graphic_second_71879(a, kz.t_p, ts,
-                                                     ex["t_kz1"], ex["t_bp"], ex["k_r"])
-        ok2 = why2 == ST_OK and t2c is not None and t2c >= 0.0
-        all_ok &= add(f"Второе КЗ ({mode['label']}): решение по (13) существует",
-                      ok2, (f"t″ = {t2c * 1000:.2f} мс от t2 при φкз = "
-                            f"{math.degrees(phi2):.1f}°" if ok2 else f"статус: {why2}"))
     return rows, all_ok
 
 
