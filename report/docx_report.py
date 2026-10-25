@@ -1,4 +1,4 @@
-"""Отчёт Word: все методы, каскадный вывод, графики. Релиз 2.3."""
+"""Отчёт Word: все методы, каскадный вывод, графики. Релиз 2.4."""
 from __future__ import annotations
 
 import io
@@ -11,9 +11,10 @@ from docx import Document
 from docx.shared import Inches
 
 from methods.gost_58669 import (
-    ANALYTIC_KEYS, GRAPHIC_KEYS, VAH_KEYS, BN_KEYS, SECOND_KZ_KEYS,
-    GRAPHIC71_KEYS, SECOND_GRAPHIC71_KEYS, K_R_PRED,
-    ST_NO_SAT, ST_OK, ST_STEADY, build_kpr_curve, ts_fact_71879,
+    ANALYTIC_KEYS, GRAPHIC_KEYS, VAH_KEYS, BN_KEYS,
+    SECOND_KZ_KEYS, SECOND_GRAPHIC_KEYS, K_R_PRED, OMEGA,
+    ST_NO_SAT, ST_OK, ST_STEADY, build_kpr_curve, build_kpr1_curve_71879,
+    ts_fact_71879,
 )
 from methods.summary import build_summary
 
@@ -77,18 +78,26 @@ def _png_curve(xs, ys, xlab, ylab, title, color, hline=None, hlabel=None):
     return buf
 
 
-def _png_kpr(kz, ct_m, r, eff):
+def _png_kpr(kz, ct_m, r, eff, standard="58669"):
     if not _HAS_MPL:
         raise RuntimeError("matplotlib не установлен")
     import matplotlib.pyplot as plt
     tn = r.t_nas * 1000.0 if r.t_nas is not None else None
     t_end = min(max(tn * 1.45, 20.0) if tn else max(kz.t_p * 3000, 40.0), 400.0)
     th = r.theta_star if r.theta_star is not None else 0.0
-    tm, ks = build_kpr_curve(kz.t_p, ct_m.alpha, th, t_end)
-    _, k0 = build_kpr_curve(kz.t_p, ct_m.alpha, 0.0, t_end)
     fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot(tm, ks, color="#d62728", lw=2, label=f"θ* = {math.degrees(th):.1f}°")
-    ax.plot(tm, k0, color="#1f77b4", lw=1.2, label="θ = 0°")
+    if standard == "71879":
+        r_sum = ct_m.r_total
+        l_sum = ct_m.l2 + ct_m.x_load_fact / OMEGA
+        ts = ts_fact_71879(ct_m)
+        tm, ks = build_kpr1_curve_71879(r_sum, l_sum, kz.t_p, ts, th, t_end)
+        ax.plot(tm, ks, color="#d62728", lw=2,
+                label=f"формула (12), φкз = {math.degrees(th):.1f}°")
+    else:
+        tm, ks = build_kpr_curve(kz.t_p, ct_m.alpha, th, t_end)
+        _, k0 = build_kpr_curve(kz.t_p, ct_m.alpha, 0.0, t_end)
+        ax.plot(tm, ks, color="#d62728", lw=2, label=f"θ* = {math.degrees(th):.1f}°")
+        ax.plot(tm, k0, color="#1f77b4", lw=1.2, label="θ = 0°")
     ax.axhline(eff, color="#2ca02c", ls="--", label=f"Уровень A·(1−K_r) = {eff:.3f}")
     if tn is not None:
         ax.axvline(tn, color="#2ca02c", ls=":")
@@ -114,7 +123,7 @@ def _method_rows(res, keys, k_r, name_prefix):
             continue
         extra = ""
         if r.status == ST_OK and r.theta_star is not None:
-            tag = "вручную" if r.theta_manual else "θ*"
+            tag = "вручную" if r.theta_manual else "φкз/θ*"
             extra = f", {tag} = {math.degrees(r.theta_star):.1f}°"
         rows.append((f"{name_prefix} — {_scenario(key, k_r)}",
                      f"{r.a:.4f}", f"{fmt_t(r)}{extra}", r.detail))
@@ -124,6 +133,7 @@ def _method_rows(res, keys, k_r, name_prefix):
 def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="both",
                  vah_curve=None, bn_data=None, bn_params=None, k_r=K_R_PRED, eps=10.0):
     is_71879 = "ct_class" in chain
+    standard = "71879" if is_71879 else "58669"
     doc = Document()
     doc.add_heading("Отчёт о проверке трансформатора тока", 0)
     p = doc.add_paragraph()
@@ -146,7 +156,7 @@ def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="b
         ("Схема вторичных обмоток", chain["scheme"]),
         ("Кабель", chain["material"]),
         ("Длина / сечение кабеля", f"{chain['length']:g} м / {chain['section']:g} мм²"),
-        ("Переходное сопротивление", f"{chain['r_per']:g} Ом"),
+        ("Переходное сопротивление (учтено)", f"{chain['r_per']:g} Ом"),
         ("Коэффициент остаточной намагниченности K_r", f"{k_r:g}"),
         ("Полная погрешность ε (для ВАХ и B(H))", f"{eps:g} %"),
         ("Требуемое t_нас", f"{t_req_ms:g} мс" if t_req_ms else "не задано"),
@@ -203,17 +213,15 @@ def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="b
                    _method_rows(res, GRAPHIC_KEYS, k_r, "графический") + \
                    _method_rows(res, VAH_KEYS, k_r, "по ВАХ") + \
                    _method_rows(res, BN_KEYS, k_r, "по B(H)") + \
-                   _method_rows(res, SECOND_KZ_KEYS, k_r, "второе КЗ (АПВ)") + \
-                   _method_rows(res, GRAPHIC71_KEYS, k_r, "графический 71879 (предв.)") + \
-                   _method_rows(res, SECOND_GRAPHIC71_KEYS, k_r,
-                                "второе КЗ 71879 (предв.)")
+                   _method_rows(res, SECOND_KZ_KEYS, k_r, "второе КЗ, аналитический") + \
+                   _method_rows(res, SECOND_GRAPHIC_KEYS, k_r, "второе КЗ, графический")
         if all_rows:
             _table(doc, ["Метод и сценарий", "A", "Время до насыщения", "Уточнение"],
                    all_rows)
 
         seen = set()
-        for key in (ANALYTIC_KEYS + GRAPHIC_KEYS + VAH_KEYS + BN_KEYS + SECOND_KZ_KEYS
-                    + GRAPHIC71_KEYS + SECOND_GRAPHIC71_KEYS):
+        for key in (ANALYTIC_KEYS + GRAPHIC_KEYS + VAH_KEYS + BN_KEYS
+                    + SECOND_KZ_KEYS + SECOND_GRAPHIC_KEYS):
             r = res.get(key)
             if r is None:
                 continue
@@ -228,7 +236,8 @@ def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="b
                 continue
             doc.add_paragraph(f"График K_п.р(t) — {_scenario(key, k_r)}:").bold = True
             try:
-                doc.add_picture(_png_kpr(kz, ct_m, r, r.a * (1 - r.k_r)), width=Inches(6))
+                doc.add_picture(_png_kpr(kz, ct_m, r, r.a * (1 - r.k_r), standard),
+                                width=Inches(6))
             except Exception as e:
                 doc.add_paragraph(f"(График не построен: {type(e).__name__}.)")
 
