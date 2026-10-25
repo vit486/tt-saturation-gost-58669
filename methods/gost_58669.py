@@ -34,7 +34,7 @@ VAH_KEYS = ("vah_without_residual", "vah_with_residual")
 BN_KEYS = ("bn_without_residual", "bn_with_residual")
 SECOND_KZ_KEYS = ("second_without_residual", "second_with_residual")
 SECOND_GRAPHIC_KEYS = ("second_graphic_without_residual", "second_graphic_with_residual")
-# Обратная совместимость с релизом 2.3 (старый app.py)
+# Обратная совместимость с релизом 2.3 (старый app.py / report)
 GRAPHIC71_KEYS = ("graphic71_without_residual", "graphic71_with_residual")
 SECOND_GRAPHIC71_KEYS = SECOND_GRAPHIC_KEYS
 
@@ -147,7 +147,7 @@ def _analytic(ct, kz, k_r, a) -> SaturationResult:
     effective = a * (1.0 - k_r)
     if not (T_P_RANGE_S[0] <= kz.t_p <= T_P_RANGE_S[1]):
         notes.append(f"T_p = {kz.t_p * 1000:.0f} мс вне диапазона приложения Б "
-                     f"({T_P_RANGE_S[0] * 1000:.0f}–{T_P_RANGE_S[1] * 1000:.0f} мс).")
+                     f"{T_P_RANGE_S[0] * 1000:.0f}–{T_P_RANGE_S[1] * 1000:.0f} мс).")
     if k_r == 0.0 and a <= 1.0:
         notes.append(NOTE_A_LE_1)
         return SaturationResult(a, k_r, ST_STEADY, 0.0, notes, "analytic",
@@ -651,7 +651,7 @@ def calculate_second_graphic_71879(ct, kz, k_r, t_kz1, t_bp, phi_override=None):
 
 
 # ---------------------------------------------------------------------------
-# Совместимость с релизом 2.3 (старый app.py)
+# Совместимость с релизом 2.3 (старый app.py / report)
 # ---------------------------------------------------------------------------
 
 def theta_from_phi_71879(phi, t_a):
