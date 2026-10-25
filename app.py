@@ -2,9 +2,18 @@
 Релиз 2.4: графический метод 71879 (формулы 12/13) выведен из предпросмотра;
 переходное сопротивление учитывается только при длине кабеля > 0."""
 import math
+import sys
 from datetime import datetime
 
 import streamlit as st
+
+# Выгружаем локальные модули перед импортом: запущенный процесс Streamlit Cloud
+# кэширует однажды импортированные модули, и без этой очистки обновления файлов
+# на GitHub могут «не видиться» приложением до ручного перезапуска.
+for _mod in [m for m in list(sys.modules)
+             if m == "methods" or m.startswith("methods.")
+             or m == "report" or m.startswith("report.")]:
+    del sys.modules[_mod]
 
 try:
     from methods.gost_58669 import (
