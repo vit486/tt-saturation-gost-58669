@@ -521,9 +521,6 @@ except ValueError as e:
     st.error(f"Ошибка исходных данных: {e}")
     st.stop()
 
-summary_rows, verdict, summary_lines, primary = build_summary(
-    results, vah_active, bn_active, t_req)
-
 # Учёт второго КЗ в итоговой оценке.
 # Для 71879 определяющим является графический метод (13), он точнее аналитического (9).
 second_kz_min_ms = None
@@ -547,6 +544,9 @@ if second_active:
         else:
             summary_lines.append(f"Второе КЗ (АПВ){t2_note}: наименьшее t″нас = "
                                  f"{second_kz_min_ms:.2f} мс ({g_note}).")
+
+summary_rows, verdict, summary_lines, primary = build_summary(
+    results, vah_active, bn_active, t_req)
 
 # ---------------------------------------------------------------------------
 # Вкладка «Результаты»
@@ -623,9 +623,10 @@ with tab_res:
 
     st.divider()
     report_bytes = build_report(ct3, chain, results, summary_lines, verdict, t_req, method,
-                                vah_curve=(vah_curve_final if vah_active else None),
-                                bn_data=(bn_data if bn_active else None),
-                                bn_params=bn_params, k_r=k_r, eps=eps)
+                            vah_curve=(vah_curve_final if vah_active else None),
+                            bn_data=(bn_data if bn_active else None),
+                            bn_params=bn_params, k_r=k_r, eps=eps,
+                            second_kz_min_ms=second_kz_min_ms)
     st.download_button("📄 Скачать отчёт (.docx)", report_bytes,
                        f"Otchet_TT_{datetime.now():%Y%m%d_%H%M}.docx",
                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
