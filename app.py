@@ -522,7 +522,8 @@ try:
 except ValueError as e:
     st.error(f"Ошибка исходных данных: {e}")
     st.stop()
-
+summary_rows, verdict, summary_lines, primary = build_summary(
+    results, vah_active, bn_active, t_req)
 # Учёт второго КЗ в итоговой оценке.
 # Для 71879 определяющим является графический метод (13), он точнее аналитического (9).
 second_kz_min_ms = None
@@ -547,8 +548,7 @@ if second_active:
             summary_lines.append(f"Второе КЗ (АПВ){t2_note}: наименьшее t″нас = "
                                  f"{second_kz_min_ms:.2f} мс ({g_note}).")
 
-summary_rows, verdict, summary_lines, primary = build_summary(
-    results, vah_active, bn_active, t_req)
+
 
 # ---------------------------------------------------------------------------
 # Вкладка «Результаты»
