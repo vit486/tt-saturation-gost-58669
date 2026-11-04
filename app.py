@@ -498,6 +498,8 @@ bn_active = bool(use_bn and bn_data is not None and bn_inputs_ok)
 second_active = bool(use_second_kz and is_71879 and t_bp is not None)
 t2 = (t_kz1 + t_bp) if (second_active and t_kz1 is not None) else None
 
+second_active = bool(use_second_kz and is_71879 and t_bp is not None)
+t2 = (t_kz1 + t_bp) if (second_active and t_kz1 is not None) else None
 try:
     with st.spinner("Каскадный расчёт методов…"):
         results = []
