@@ -534,12 +534,9 @@ if second_active:
                 t2_vals.append(r.t_nas * 1000.0)
     if t2_vals:
         second_kz_min_ms = min(t2_vals)
- #       t2_note = (f" (t2 = {t2:.2f} с)" if t2 is not None else "")
- #       g_note = "графический, формула (13)" if is_71879 else "аналитический, формула (9)"
- #       if t_req > 0 and second_kz_min_ms < t_req:
-       t2_note = (f" (t2 = {t_kz1 + t_bp:.2f} с)"
-           if second_active and t_kz1 is not None and t_bp is not None
-           else "")
+        t2_note = (f" (t2 = {t2:.2f} с)" if t2 is not None else "")
+        g_note = "графический, формула (13)" if is_71879 else "аналитический, формула (9)"
+        if t_req > 0 and second_kz_min_ms < t_req:
             verdict = "danger"
             summary_lines.append(f"Второе КЗ (АПВ){t2_note}: наименьшее t″нас = "
                                  f"{second_kz_min_ms:.2f} мс ({g_note}) < требуемого "
