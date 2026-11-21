@@ -535,12 +535,15 @@ if second_active:
             r = res.get(key)
             if r is not None and r.status == ST_OK and r.t_nas is not None:
                 t2_vals.append(r.t_nas * 1000.0)
+    
     if t2_vals:
         second_kz_min_ms = min(t2_vals)
         t2_note = (f" (t2 = {t2:.2f} с)" if t2 is not None else "")
         g_note = "графический, формула (13)" if is_71879 else "аналитический, формула (9)"
+        
+        # Теперь summary_lines уже существует, безопасно делаем append
         if t_req > 0 and second_kz_min_ms < t_req:
-            verdict = "danger"
+            verdict = "danger"  # Ужесточаем вердикт, если второе КЗ не проходит требование
             summary_lines.append(f"Второе КЗ (АПВ){t2_note}: наименьшее t″нас = "
                                  f"{second_kz_min_ms:.2f} мс ({g_note}) < требуемого "
                                  f"{t_req:g} мс — условие НЕ выполняется.")
