@@ -258,7 +258,7 @@ def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="b
         except Exception as e:
             doc.add_paragraph(f"(График B(H) не построен: {type(e).__name__}.)")
 
-        doc.add_heading("Сводка по всем методам и итоговая оценка", level=1)
+    doc.add_heading("Сводка по всем методам и итоговая оценка", level=1)
     rows, _, lines, primary = build_summary(results, bool(vah_curve), bool(bn_data), t_req_ms)
     _table(doc, ["Метод", "Статус", "t_нас, мс", "Пояснение"],
            [(r["Метод"], r["Статус"], r["t_нас, мс"], r["Пояснение"]) for r in rows])
@@ -267,7 +267,15 @@ def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="b
     if second_kz_min_ms is not None:
         t_kz1 = chain.get("t_kz1")
         t_bp = chain.get("t_bp")
-        t2…я.")
+        t2 = (t_kz1 + t_bp) if (t_kz1 is not None and t_bp is not None) else None
+        t2_note = (f" (t2 = {t2:.2f} с)" if t2 is not None else "")
+        is_71879 = "ct_class" in chain
+        g_note = "графический, формула (13)" if is_71879 else "аналитический, формула (9)"
+        
+        if t_req_ms > 0 and second_kz_min_ms < t_req_ms:
+            lines.append(f"Второе КЗ (АПВ){t2_note}: наименьшее t″нас = "
+                         f"{second_kz_min_ms:.2f} мс ({g_note}) < требуемого "
+                         f"{t_req_ms:g} мс — условие НЕ выполняется.")
         else:
             lines.append(f"Второе КЗ (АПВ){t2_note}: наименьшее t″нас = "
                          f"{second_kz_min_ms:.2f} мс ({g_note}).")
