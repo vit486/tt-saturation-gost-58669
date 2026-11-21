@@ -263,15 +263,11 @@ def build_report(ct, chain, results, verdict_lines, verdict, t_req_ms, method="b
     _table(doc, ["Метод", "Статус", "t_нас, мс", "Пояснение"],
            [(r["Метод"], r["Статус"], r["t_нас, мс"], r["Пояснение"]) for r in rows])
 
-    # Добавляем строку про второе КЗ, если она есть
+    # Добавляем строку про второе КЗ, если она была передана из app.py
     if second_kz_min_ms is not None:
-        t2 = chain.get("t_kz1") + chain.get("t_bp") if (chain.get("t_kz1") is not None and chain.get("t_bp") is not None) else None
-        t2_note = (f" (t2 = {t2:.2f} с)" if t2 is not None else "")
-        g_note = "графический, формула (13)" if is_71879 else "аналитический, формула (9)"
-        if t_req_ms > 0 and second_kz_min_ms < t_req_ms:
-            lines.append(f"Второе КЗ (АПВ){t2_note}: наименьшее t″нас = "
-                         f"{second_kz_min_ms:.2f} мс ({g_note}) < требуемого "
-                         f"{t_req_ms:g} мс — условие НЕ выполняется.")
+        t_kz1 = chain.get("t_kz1")
+        t_bp = chain.get("t_bp")
+        t2…я.")
         else:
             lines.append(f"Второе КЗ (АПВ){t2_note}: наименьшее t″нас = "
                          f"{second_kz_min_ms:.2f} мс ({g_note}).")
